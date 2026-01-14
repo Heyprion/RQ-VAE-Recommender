@@ -1,0 +1,46 @@
+import data.processed
+import modules.model
+
+# 训练步数与优化器超参数
+train.iterations=50000
+train.learning_rate=0.0003
+train.weight_decay=0.035
+train.batch_size=256
+
+# RQ‑VAE tokenizer 相关超参（需与对应的 RQ‑VAE 一致）
+train.vae_input_dim=768
+train.vae_hidden_dims=[512, 256, 128]
+train.vae_embed_dim=32
+train.vae_n_cat_feats=0
+train.vae_codebook_size=256
+
+# 预训练 RQ‑VAE
+train.pretrained_rqvae_path="trained_models/rqvae_amazon_beauty/checkpoint_399999.pt"
+
+# 数据集路径与处理选项
+train.save_dir_root="out/decoder/amazon_beauty_context1/"
+train.dataset_folder="dataset/amazon"
+train.dataset=%data.processed.RecDataset.AMAZON
+train.force_dataset_process=False
+train.dataset_split="beauty"
+
+# 评估频率（步）
+train.full_eval_every=50000
+train.partial_eval_every=10000
+
+# Decoder Transformer 超参
+train.dropout_p=0.15
+train.attn_heads=8
+train.attn_embed_dim=512
+train.attn_layers=8
+train.decoder_embed_dim=128
+train.model_jagged_mode=True
+
+# 方案1：上下文作为额外条件 token（不改变 SID 维度）
+train.context1_enabled=True
+train.context1_num_buckets=256
+train.context1_source="user"
+
+# 日志
+train.wandb_logging=True
+train.save_name_prefix="beauty_context1_decoder"

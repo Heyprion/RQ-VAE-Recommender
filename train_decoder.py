@@ -82,7 +82,12 @@ def train(
     train_data_subsample=True,  # 是否对训练序列做随机子序列采样
     model_jagged_mode=True,  # 是否使用 jagged（变长）注意力实现
     vae_hf_model_name="edobotta/rqvae-amazon-beauty",  # 推送到 HF 的模型名
-    save_name_prefix="checkpoint"  # 保存权重文件名前缀
+    save_name_prefix="checkpoint",  # 保存权重文件名前缀
+    context1_enabled=False,  # 是否启用方案1：上下文作为额外条件 token
+    context1_num_buckets=256,  # 方案1上下文桶数量
+    context1_source="user",  # 方案1上下文来源：user/seq_len
+    context2_enabled=False,  # 是否启用方案2：主SID + 动态上下文ID
+    context2_codebook_layer=0  # 方案2上下文ID使用的 RQ‑VAE codebook 层索引
 ):  
     # 当前解码器训练仅支持 Amazon 数据集（其他数据集路径尚未接通）
     if dataset != RecDataset.AMAZON:
@@ -167,6 +172,12 @@ def train(
         tokenizer.rq_vae.push_to_hub(vae_hf_model_name)
 
     # Transformer 编解码模型：预测下一个语义 ID token
+    base_sem_id_dim = tokenizer.sem_ids_dim
+    sem_id_dim = base_sem_id_dim + (1 if context2_enabled else 0)
+    inference_verifier_fn = (
+        (lambda x: tokenizer.exists_prefix(x[..., :base_sem_id_dim]))
+        if context2_enabled else (lambda x: tokenizer.exists_prefix(x))
+    )
     model = EncoderDecoderRetrievalModel(
         embedding_dim=decoder_embed_dim,
         attn_dim=attn_embed_dim,
@@ -174,9 +185,18 @@ def train(
         num_heads=attn_heads,
         n_layers=attn_layers,
         num_embeddings=vae_codebook_size,
-        inference_verifier_fn=lambda x: tokenizer.exists_prefix(x),
-        sem_id_dim=tokenizer.sem_ids_dim,
-        max_pos=train_dataset.max_seq_len*tokenizer.sem_ids_dim,
+        inference_verifier_fn=inference_verifier_fn,
+        sem_id_dim=sem_id_dim,
+        base_sem_id_dim=base_sem_id_dim,
+        context1_enabled=context1_enabled,
+        context1_num_buckets=context1_num_buckets,
+        context1_source=context1_source,
+        context2_enabled=context2_enabled,
+        context2_codebook=tokenizer.rq_vae.layers[context2_codebook_layer].embedding.weight if context2_enabled else None,
+        context2_embed_dim=vae_embed_dim if context2_enabled else None,
+        context2_rqvae_encoder=tokenizer.rq_vae.encoder if context2_enabled else None,
+        context2_rqvae_input_dim=vae_input_dim if context2_enabled else None,
+        max_pos=train_dataset.max_seq_len*sem_id_dim,
         jagged_mode=model_jagged_mode
     )
 

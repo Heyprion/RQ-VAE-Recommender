@@ -49,6 +49,15 @@ class EncoderDecoderRetrievalModel(nn.Module):
         num_embeddings,
         sem_id_dim,
         inference_verifier_fn,
+        base_sem_id_dim=None,
+        context1_enabled: bool = False,
+        context1_num_buckets: int = 0,
+        context1_source: str = "user",
+        context2_enabled: bool = False,
+        context2_codebook: Tensor | None = None,
+        context2_embed_dim: int | None = None,
+        context2_rqvae_encoder: nn.Module | None = None,
+        context2_rqvae_input_dim: int | None = None,
         max_pos=2048,
         jagged_mode: bool = True,
     ) -> None:
@@ -57,9 +66,36 @@ class EncoderDecoderRetrievalModel(nn.Module):
         self.jagged_mode = jagged_mode
         self.num_embeddings = num_embeddings
         self.sem_id_dim = sem_id_dim
+        self.base_sem_id_dim = base_sem_id_dim or sem_id_dim
         self.attn_dim = attn_dim
         self.inference_verifier_fn = inference_verifier_fn
         self.enable_generation = False
+        self.context1_enabled = context1_enabled
+        self.context2_enabled = context2_enabled
+        if self.context1_enabled:
+            if context1_num_buckets <= 0:
+                raise ValueError("context1_num_buckets must be > 0 when context1_enabled is True.")
+            self.context1_num_buckets = context1_num_buckets
+            self.context1_source = context1_source
+            self.context1_embedder = nn.Embedding(context1_num_buckets, embedding_dim)
+
+        if self.context2_enabled:
+            if context2_codebook is None or context2_embed_dim is None:
+                raise ValueError("context2_codebook and context2_embed_dim are required when context2_enabled is True.")
+            # Freeze codebook weights for context2 ID quantization.
+            self.register_buffer("context2_codebook", context2_codebook.detach().clone())
+            if context2_rqvae_encoder is not None:
+                if context2_rqvae_input_dim is None:
+                    raise ValueError("context2_rqvae_input_dim is required when context2_rqvae_encoder is provided.")
+                self.context2_adapter = nn.Linear(attn_dim, context2_rqvae_input_dim, bias=False)
+                self.context2_encoder = context2_rqvae_encoder
+                for p in self.context2_encoder.parameters():
+                    p.requires_grad = False
+                self.context2_proj = None
+            else:
+                self.context2_proj = nn.Linear(attn_dim, context2_embed_dim, bias=False)
+                self.context2_adapter = None
+                self.context2_encoder = None
 
         self.bos_emb = nn.Parameter(torch.rand(embedding_dim))
         self.norm = RMSNorm(embedding_dim)
@@ -98,6 +134,138 @@ class EncoderDecoderRetrievalModel(nn.Module):
         self.in_proj_context = nn.Linear(embedding_dim, attn_dim, bias=False)
         self.out_proj = nn.Linear(attn_dim, num_embeddings, bias=False)
     
+    def _context2_quantize(self, x: Tensor) -> Tensor:
+        # Nearest-neighbor lookup in the shared RQ-VAE codebook.
+        codebook = self.context2_codebook
+        dist = (
+            (x**2).sum(axis=-1, keepdim=True) +
+            (codebook.T**2).sum(axis=0, keepdim=True) -
+            2 * x @ codebook.T
+        )
+        return dist.min(axis=-1).indices
+
+    @torch.no_grad
+    def _compute_context2_ids(self, sem_ids: Tensor, seq_mask_item: Tensor, token_type_ids: Tensor, user_ids: Tensor) -> tuple[Tensor, Tensor]:
+        """
+        Compute per-item and next-item context2 IDs from a transformer encoder pass.
+        Returns:
+          context_ids: (B, N) per-item IDs for history
+          context_id_fut: (B,) ID for next-item context
+        """
+        # Build embeddings from stable semantic IDs (no context ID).
+        base_batch = TokenizedSeqBatch(
+            user_ids=user_ids,
+            sem_ids=sem_ids,
+            sem_ids_fut=None,
+            seq_mask=seq_mask_item.repeat_interleave(self.base_sem_id_dim, dim=1),
+            token_type_ids=token_type_ids,
+            token_type_ids_fut=None
+        )
+        sem_ids_emb = self.sem_id_embedder(base_batch).seq
+
+        B, N, _ = sem_ids_emb.shape
+        seq_lengths_tokens = seq_mask_item.sum(axis=1) * self.base_sem_id_dim
+        pos = torch.arange(sem_ids_emb.shape[1], device=sem_ids_emb.device).unsqueeze(0)
+        wpe = self.wpe(pos)
+        user_emb = self.user_id_embedder(base_batch.user_ids)
+        input_embedding = torch.cat([user_emb, wpe + sem_ids_emb], axis=1)
+        input_embedding = self.in_proj_context(self.do(self.norm(input_embedding)))
+
+        if self.jagged_mode:
+            input_embedding = padded_to_jagged_tensor(
+                input_embedding, lengths=seq_lengths_tokens + 1, max_len=input_embedding.shape[1]
+            )
+            enc_out = self.transformer.encoder(
+                x=input_embedding, padding_mask=seq_mask_item.repeat_interleave(self.base_sem_id_dim, dim=1), is_causal=False, context=None, jagged=True
+            )
+        else:
+            # Unjagged attention not supported by current implementation.
+            raise Exception("Context ID computation requires jagged_mode=True.")
+
+        values = enc_out.values()
+        offsets = enc_out.offsets()
+
+        context_ids = torch.zeros(seq_mask_item.shape, device=sem_ids.device, dtype=torch.long)
+        context_id_fut = torch.zeros(sem_ids.shape[0], device=sem_ids.device, dtype=torch.long)
+
+        for b in range(B):
+            seq_len_items = int(seq_mask_item[b].sum().item())
+            if seq_len_items == 0:
+                continue
+            start = int(offsets[b].item())
+            end = int(offsets[b + 1].item())
+            token_len = seq_len_items * self.base_sem_id_dim
+            # Drop user token at position 0.
+            seq_tokens = values[start + 1:start + 1 + token_len]
+            seq_tokens = seq_tokens.reshape(seq_len_items, self.base_sem_id_dim, self.attn_dim)
+            item_ctx = seq_tokens.mean(dim=1)
+            if self.context2_encoder is not None:
+                proj = self.context2_encoder(self.context2_adapter(item_ctx))
+            else:
+                proj = self.context2_proj(item_ctx)
+            ids = self._context2_quantize(proj)
+            context_ids[b, :seq_len_items] = ids
+
+            fut_ctx = item_ctx.mean(dim=0, keepdim=True)
+            if self.context2_encoder is not None:
+                fut_proj = self.context2_encoder(self.context2_adapter(fut_ctx))
+            else:
+                fut_proj = self.context2_proj(fut_ctx)
+            context_id_fut[b] = self._context2_quantize(fut_proj).squeeze(0)
+
+        return context_ids, context_id_fut
+
+    def _augment_with_context2_ids(self, batch: TokenizedSeqBatch) -> TokenizedSeqBatch:
+        # Build item-level mask from token-level mask.
+        seq_mask_item = batch.seq_mask[:, ::self.base_sem_id_dim]
+        N = seq_mask_item.shape[1]
+        sem_ids = rearrange(batch.sem_ids, "b (n d) -> b n d", d=self.base_sem_id_dim)
+
+        token_type_ids = torch.arange(self.base_sem_id_dim, device=sem_ids.device).repeat(sem_ids.shape[0], N)
+        context_ids, context_id_fut = self._compute_context2_ids(
+            sem_ids=rearrange(sem_ids, "b n d -> b (n d)"),
+            seq_mask_item=seq_mask_item,
+            token_type_ids=token_type_ids,
+            user_ids=batch.user_ids
+        )
+
+        sem_ids = torch.cat([sem_ids, context_ids.unsqueeze(-1)], dim=2)
+        sem_ids_fut = batch.sem_ids_fut
+        if sem_ids_fut is not None and (self.training or not self.enable_generation):
+            sem_ids_fut = torch.cat([sem_ids_fut, context_id_fut.unsqueeze(1)], dim=1)
+
+        sem_ids = rearrange(sem_ids, "b n d -> b (n d)")
+
+        token_type_ids = torch.arange(self.base_sem_id_dim + 1, device=sem_ids.device).repeat(sem_ids.shape[0], N)
+        token_type_ids_fut = (
+            torch.arange(sem_ids_fut.shape[1], device=sem_ids.device).repeat(sem_ids.shape[0], 1)
+            if sem_ids_fut is not None else None
+        )
+        seq_mask = seq_mask_item.repeat_interleave(self.base_sem_id_dim + 1, dim=1)
+
+        return TokenizedSeqBatch(
+            user_ids=batch.user_ids,
+            sem_ids=sem_ids,
+            sem_ids_fut=sem_ids_fut,
+            seq_mask=seq_mask,
+            token_type_ids=token_type_ids,
+            token_type_ids_fut=token_type_ids_fut
+        )
+
+    def _compute_context1_ids(self, batch: TokenizedSeqBatch) -> Tensor:
+        if self.context1_source == "user":
+            ids = batch.user_ids % self.context1_num_buckets
+        elif self.context1_source == "seq_len":
+            seq_mask_item = batch.seq_mask[:, ::self.base_sem_id_dim]
+            seq_len = seq_mask_item.sum(axis=1).to(torch.long)
+            ids = torch.minimum(
+                seq_len,
+                torch.tensor(self.context1_num_buckets - 1, device=seq_len.device)
+            )
+        else:
+            raise ValueError(f"Unsupported context1_source: {self.context1_source}")
+        return ids
+
     def _predict(self, batch: TokenizedSeqBatch) -> AttentionInput:
         user_emb = self.user_id_embedder(batch.user_ids)
         sem_ids_emb = self.sem_id_embedder(batch)
@@ -112,7 +280,15 @@ class EncoderDecoderRetrievalModel(nn.Module):
         pos = torch.arange(N, device=sem_ids_emb.device).unsqueeze(0)
         wpe = self.wpe(pos)
 
-        input_embedding = torch.cat([user_emb, wpe + sem_ids_emb], axis=1)
+        prefix_tokens = [user_emb]
+        if self.context1_enabled:
+            context1_ids = self._compute_context1_ids(batch)
+            context1_emb = self.context1_embedder(context1_ids)
+            if context1_emb.dim() == 2:
+                context1_emb = context1_emb.unsqueeze(1)
+            prefix_tokens.append(context1_emb)
+        input_embedding = torch.cat(prefix_tokens + [wpe + sem_ids_emb], axis=1)
+        prefix_len = len(prefix_tokens)
         input_embedding_fut = self.bos_emb.repeat(B, 1, 1)
         if sem_ids_emb_fut is not None:
             tte_fut = self.tte(batch.token_type_ids_fut)
@@ -123,13 +299,13 @@ class EncoderDecoderRetrievalModel(nn.Module):
             )
 
         if self.jagged_mode:
-            input_embedding = padded_to_jagged_tensor(input_embedding, lengths=seq_lengths+1, max_len=input_embedding.shape[1])
+            input_embedding = padded_to_jagged_tensor(input_embedding, lengths=seq_lengths+prefix_len, max_len=input_embedding.shape[1])
 
             seq_lengths_fut = torch.tensor(input_embedding_fut.shape[1], device=input_embedding_fut.device, dtype=torch.int64).repeat(B)
             input_embedding_fut = padded_to_jagged_tensor(input_embedding_fut, lengths=seq_lengths_fut, max_len=input_embedding_fut.shape[1])
         else:
             mem_mask = torch.cat([
-                torch.ones(B, 1, dtype=torch.bool, device=batch.seq_mask.device),
+                torch.ones(B, prefix_len, dtype=torch.bool, device=batch.seq_mask.device),
                 batch.seq_mask
             ], axis=1)
             f_mask = torch.zeros_like(mem_mask, dtype=torch.float32)
@@ -245,6 +421,8 @@ class EncoderDecoderRetrievalModel(nn.Module):
             
     @torch.compile
     def forward(self, batch: TokenizedSeqBatch) -> ModelOutput:
+        if self.context2_enabled:
+            batch = self._augment_with_context2_ids(batch)
         seq_mask = batch.seq_mask
         B, N = seq_mask.shape
 
