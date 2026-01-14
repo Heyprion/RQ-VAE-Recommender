@@ -395,8 +395,22 @@ class EncoderDecoderRetrievalModel(nn.Module):
                 # TODO: Figure out how to avoid jagged - padded conversions 
                 # (E.g. Implement repeat_interleave jagged kernel)
                 if self.jagged_mode:
-                    cache = torch.zeros(input_batch.sem_ids.shape[0], input_batch.sem_ids.shape[1]+1, self.attn_dim, device=input_batch.sem_ids.device)
-                    cache_mask = torch.cat([torch.ones(input_batch.sem_ids.shape[0], 1, dtype=bool, device=input_batch.seq_mask.device), input_batch.seq_mask], axis=1)
+                    cache_batch = input_batch
+                    if self.context2_enabled:
+                        cache_batch = self._augment_with_context2_ids(input_batch)
+
+                    prefix_len = 1 + (1 if self.context1_enabled else 0)
+                    cache = torch.zeros(
+                        cache_batch.sem_ids.shape[0],
+                        cache_batch.sem_ids.shape[1] + prefix_len,
+                        self.attn_dim,
+                        device=cache_batch.sem_ids.device
+                    )
+                    cache_mask = torch.cat(
+                        [torch.ones(cache_batch.sem_ids.shape[0], prefix_len, dtype=bool, device=cache_batch.seq_mask.device),
+                         cache_batch.seq_mask],
+                        axis=1
+                    )
                     cache[cache_mask] = self.transformer.cached_enc_output.values()
                     lengths = self.transformer.cached_enc_output.offsets().diff().repeat_interleave(k)
                     cache = cache.repeat_interleave(k, dim=0)

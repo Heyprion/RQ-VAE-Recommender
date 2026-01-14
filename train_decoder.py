@@ -269,6 +269,22 @@ def train(
 
             accelerator.wait_for_everyone()
 
+            saved_final = False
+            if accelerator.is_main_process and (iter+1) == iterations:
+                # Save final checkpoint before eval to avoid losing it if eval crashes.
+                state = {
+                    "iter": iter,
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "scheduler": lr_scheduler.state_dict()
+                }
+
+                if not os.path.exists(save_dir_root):
+                    os.makedirs(save_dir_root)
+
+                torch.save(state, save_dir_root + f"{save_name_prefix}_{iter}.pt")
+                saved_final = True
+
             if (iter+1) % partial_eval_every == 0:
                 # 部分评估：只算 loss，不做生成
                 model.eval()
@@ -315,7 +331,7 @@ def train(
                 metrics_accumulator.reset()
 
             if accelerator.is_main_process:
-                if (iter+1) % save_model_every == 0 or iter+1 == iterations:
+                if ((iter+1) % save_model_every == 0 or iter+1 == iterations) and not saved_final:
                     # 保存训练状态（便于续训）
                     state = {
                         "iter": iter,
