@@ -313,6 +313,9 @@ def train(
 
                         generated = model.generate_next_sem_id(tokenized_data, top_k=True, temperature=1)
                         actual, top_k = tokenized_data.sem_ids_fut, generated.sem_ids
+                        if context2_enabled:
+                            actual = actual[:, :base_sem_id_dim]
+                            top_k = top_k[..., :base_sem_id_dim]
 
                         # 累积 Top‑K 指标
                         metrics_accumulator.accumulate(actual=actual, top_k=top_k)
