@@ -36,8 +36,14 @@ class AmazonReviews(InMemoryDataset, PreprocessingMixin):
         transform: Optional[Callable] = None,
         pre_transform: Optional[Callable] = None,
         force_reload: bool = False,
+        text_encoder: str = "t5",
+        tfidf_max_features: int = 50000,
+        tfidf_svd_dim: int = 768,
     ) -> None:
         self.split = split
+        self.text_encoder = text_encoder
+        self.tfidf_max_features = tfidf_max_features
+        self.tfidf_svd_dim = tfidf_svd_dim
         super(AmazonReviews, self).__init__(
             root, transform, pre_transform, force_reload
         )
@@ -128,7 +134,12 @@ class AmazonReviews(InMemoryDataset, PreprocessingMixin):
             axis=1
         )
         
-        item_emb = self._encode_text_feature(sentences)
+        item_emb = self._encode_text_feature(
+            sentences,
+            method=self.text_encoder,
+            tfidf_max_features=self.tfidf_max_features,
+            tfidf_svd_dim=self.tfidf_svd_dim
+        )
         data['item'].x = item_emb
         data['item'].text = np.array(sentences)
 

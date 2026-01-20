@@ -37,11 +37,33 @@ class PreprocessingMixin:
         return out
 
     @staticmethod
-    def _encode_text_feature(text_feat, model=None):
-        if model is None:
-            model = SentenceTransformer('sentence-transformers/sentence-t5-xxl')
-        embeddings = model.encode(batch_size=2, sentences=text_feat, show_progress_bar=True, convert_to_tensor=True).cpu()
-        return embeddings
+    def _encode_text_feature(
+        text_feat,
+        model=None,
+        method: str = "t5",
+        tfidf_max_features: int = 50000,
+        tfidf_svd_dim: int = 768
+    ):
+        if method == "t5":
+            if model is None:
+                model = SentenceTransformer('sentence-transformers/sentence-t5-xxl')
+            embeddings = model.encode(batch_size=2, sentences=text_feat, show_progress_bar=True, convert_to_tensor=True).cpu()
+            return embeddings
+        if method == "tfidf":
+            try:
+                from sklearn.feature_extraction.text import TfidfVectorizer
+                from sklearn.decomposition import TruncatedSVD
+            except Exception as exc:
+                raise RuntimeError("TF-IDF requested but scikit-learn is not installed.") from exc
+
+            vectorizer = TfidfVectorizer(max_features=tfidf_max_features)
+            x = vectorizer.fit_transform(text_feat)
+            if tfidf_svd_dim is not None:
+                svd = TruncatedSVD(n_components=tfidf_svd_dim, random_state=42)
+                x = svd.fit_transform(x)
+            return torch.from_numpy(x).to(torch.float32)
+
+        raise ValueError(f"Unsupported text encoding method: {method}")
     
     @staticmethod
     def _rolling_window(group, features, window_size=200, stride=1):
@@ -161,4 +183,3 @@ class PreprocessingMixin:
         )
         
         return out
-

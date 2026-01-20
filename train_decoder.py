@@ -87,7 +87,10 @@ def train(
     context1_num_buckets=256,  # 方案1上下文桶数量
     context1_source="user",  # 方案1上下文来源：user/seq_len
     context2_enabled=False,  # 是否启用方案2：主SID + 动态上下文ID
-    context2_codebook_layer=0  # 方案2上下文ID使用的 RQ‑VAE codebook 层索引
+    context2_codebook_layer=0,  # 方案2上下文ID使用的 RQ‑VAE codebook 层索引
+    text_encoder="t5",  # item文本向量化方法：t5/tfidf
+    tfidf_max_features=50000,  # TF-IDF词表大小上限
+    tfidf_svd_dim=768  # TF-IDF降维维度
 ):  
     # 当前解码器训练仅支持 Amazon 数据集（其他数据集路径尚未接通）
     if dataset != RecDataset.AMAZON:
@@ -118,7 +121,10 @@ def train(
         root=dataset_folder,
         dataset=dataset,
         force_process=force_dataset_process,
-        split=dataset_split
+        split=dataset_split,
+        text_encoder=text_encoder,
+        tfidf_max_features=tfidf_max_features,
+        tfidf_svd_dim=tfidf_svd_dim
     )
     # train_dataset: 训练用用户序列
     train_dataset = SeqData(
@@ -126,7 +132,10 @@ def train(
         dataset=dataset, 
         is_train=True, 
         subsample=train_data_subsample, 
-        split=dataset_split
+        split=dataset_split,
+        text_encoder=text_encoder,
+        tfidf_max_features=tfidf_max_features,
+        tfidf_svd_dim=tfidf_svd_dim
     )
     # eval_dataset: 评估用用户序列
     eval_dataset = SeqData(
@@ -134,7 +143,10 @@ def train(
         dataset=dataset, 
         is_train=False, 
         subsample=False, 
-        split=dataset_split
+        split=dataset_split,
+        text_encoder=text_encoder,
+        tfidf_max_features=tfidf_max_features,
+        tfidf_svd_dim=tfidf_svd_dim
     )
 
     # 普通 DataLoader（batch_size 由 gin 配置）

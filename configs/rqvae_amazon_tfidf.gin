@@ -1,0 +1,40 @@
+import data.processed
+import modules.quantize
+
+# 训练步数与优化器超参数
+train.iterations=200000
+train.learning_rate=0.0005
+train.weight_decay=0.01
+train.batch_size=64
+
+# RQ‑VAE 结构参数
+train.vae_input_dim=768
+train.vae_n_cat_feats=0
+train.vae_hidden_dims=[512, 256, 128]
+train.vae_embed_dim=32
+train.vae_codebook_size=256
+train.vae_codebook_normalize=False
+train.vae_sim_vq=False
+train.vae_n_layers=3
+train.vae_codebook_mode=%modules.quantize.QuantizeForwardMode.ROTATION_TRICK
+train.commitment_weight=0.25
+
+# TF‑IDF 文本向量化
+train.text_encoder="tfidf"
+train.tfidf_max_features=50000
+train.tfidf_svd_dim=768
+train.force_dataset_process=True
+
+# 评估/保存
+train.save_model_every=5000
+train.eval_every=5000
+train.do_eval=True
+
+# 数据集与路径
+train.dataset_folder="dataset/amazon"
+train.dataset=%data.processed.RecDataset.AMAZON
+train.dataset_split="beauty"
+train.save_dir_root="out/rqvae/amazon_tfidf/"
+
+# 日志
+train.wandb_logging=True

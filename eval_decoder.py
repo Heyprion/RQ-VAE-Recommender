@@ -76,7 +76,10 @@ def evaluate(
     context1_num_buckets=256,
     context1_source="user",
     context2_enabled=False,
-    context2_codebook_layer=0
+    context2_codebook_layer=0,
+    text_encoder="t5",
+    tfidf_max_features=50000,
+    tfidf_svd_dim=768
 ):
     if dataset != RecDataset.AMAZON:
         raise Exception(f"Dataset currently not supported: {dataset}.")
@@ -94,14 +97,20 @@ def evaluate(
         root=dataset_folder,
         dataset=dataset,
         force_process=force_dataset_process,
-        split=dataset_split
+        split=dataset_split,
+        text_encoder=text_encoder,
+        tfidf_max_features=tfidf_max_features,
+        tfidf_svd_dim=tfidf_svd_dim
     )
     eval_dataset = SeqData(
         root=dataset_folder,
         dataset=dataset,
         is_train=False,
         subsample=False,
-        split=dataset_split
+        split=dataset_split,
+        text_encoder=text_encoder,
+        tfidf_max_features=tfidf_max_features,
+        tfidf_svd_dim=tfidf_svd_dim
     )
 
     eval_dataloader = torch.utils.data.DataLoader(eval_dataset, batch_size=batch_size, shuffle=False)

@@ -51,7 +51,10 @@ def train(
     vae_codebook_mode=QuantizeForwardMode.GUMBEL_SOFTMAX,
     vae_sim_vq=False,
     vae_n_layers=3,
-    dataset_split="beauty"
+    dataset_split="beauty",
+    text_encoder="t5",
+    tfidf_max_features=50000,
+    tfidf_svd_dim=768
 ):
     if wandb_logging:
         params = locals()
@@ -63,17 +66,46 @@ def train(
 
     device = accelerator.device
 
-    train_dataset = ItemData(root=dataset_folder, dataset=dataset, force_process=force_dataset_process, train_test_split="train" if do_eval else "all", split=dataset_split)
+    train_dataset = ItemData(
+        root=dataset_folder,
+        dataset=dataset,
+        force_process=force_dataset_process,
+        train_test_split="train" if do_eval else "all",
+        split=dataset_split,
+        text_encoder=text_encoder,
+        tfidf_max_features=tfidf_max_features,
+        tfidf_svd_dim=tfidf_svd_dim
+    )
     train_sampler = BatchSampler(RandomSampler(train_dataset), batch_size, False)
     train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=None, collate_fn=lambda batch: batch)
     train_dataloader = cycle(train_dataloader)
 
     if do_eval:
-        eval_dataset = ItemData(root=dataset_folder, dataset=dataset, force_process=False, train_test_split="eval", split=dataset_split)
+        eval_dataset = ItemData(
+            root=dataset_folder,
+            dataset=dataset,
+            force_process=False,
+            train_test_split="eval",
+            split=dataset_split,
+            text_encoder=text_encoder,
+            tfidf_max_features=tfidf_max_features,
+            tfidf_svd_dim=tfidf_svd_dim
+        )
         eval_sampler = BatchSampler(RandomSampler(eval_dataset), batch_size, False)
         eval_dataloader = DataLoader(eval_dataset, sampler=eval_sampler, batch_size=None, collate_fn=lambda batch: batch)
 
-    index_dataset = ItemData(root=dataset_folder, dataset=dataset, force_process=False, train_test_split="all", split=dataset_split) if do_eval else train_dataset
+    index_dataset = (
+        ItemData(
+            root=dataset_folder,
+            dataset=dataset,
+            force_process=False,
+            train_test_split="all",
+            split=dataset_split,
+            text_encoder=text_encoder,
+            tfidf_max_features=tfidf_max_features,
+            tfidf_svd_dim=tfidf_svd_dim
+        ) if do_eval else train_dataset
+    )
     
     train_dataloader = accelerator.prepare(train_dataloader)
     # TODO: Investigate bug with prepare eval_dataloader

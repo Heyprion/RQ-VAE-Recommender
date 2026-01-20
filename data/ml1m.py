@@ -17,8 +17,14 @@ class RawMovieLens1M(MovieLens1M, PreprocessingMixin):
         transform=None,
         pre_transform=None,
         force_reload=False,
-        split=None
+        split=None,
+        text_encoder: str = "t5",
+        tfidf_max_features: int = 50000,
+        tfidf_svd_dim: int = 768,
     ) -> None:
+        self.text_encoder = text_encoder
+        self.tfidf_max_features = tfidf_max_features
+        self.tfidf_svd_dim = tfidf_svd_dim
         super(RawMovieLens1M, self).__init__(
             root, transform, pre_transform, force_reload
         )
@@ -54,7 +60,12 @@ class RawMovieLens1M(MovieLens1M, PreprocessingMixin):
         genres = torch.from_numpy(genres).to(torch.float)
 
         titles_text = df["title"].apply(lambda s: s.split("(")[0].strip()).tolist()
-        titles_emb = self._encode_text_feature(titles_text)
+        titles_emb = self._encode_text_feature(
+            titles_text,
+            method=self.text_encoder,
+            tfidf_max_features=self.tfidf_max_features,
+            tfidf_svd_dim=self.tfidf_svd_dim
+        )
 
         x = torch.cat([titles_emb, genres], axis=1)
 
