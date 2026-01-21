@@ -2,7 +2,7 @@ import data.processed
 import modules.quantize
 
 # 训练步数与优化器超参数
-train.iterations=200000
+train.iterations=400000
 train.learning_rate=0.0005
 train.weight_decay=0.01
 train.batch_size=64
