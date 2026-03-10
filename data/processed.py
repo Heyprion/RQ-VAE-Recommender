@@ -63,13 +63,18 @@ class ItemData(Dataset):
         elif train_test_split == "all":
             filt = torch.ones_like(raw_data.data["item"]["x"][:,0], dtype=bool)
 
+        self.item_ids = torch.arange(raw_data.data["item"]["x"].shape[0])[filt]
         self.item_data, self.item_text = raw_data.data["item"]["x"][filt], raw_data.data["item"]["text"][filt]
 
     def __len__(self):
         return self.item_data.shape[0]
 
     def __getitem__(self, idx):
-        item_ids = torch.tensor(idx).unsqueeze(0) if not isinstance(idx, torch.Tensor) else idx
+        item_ids = self.item_ids[idx]
+        if not isinstance(item_ids, torch.Tensor):
+            item_ids = torch.tensor(item_ids)
+        if item_ids.ndim == 0:
+            item_ids = item_ids.unsqueeze(0)
         x = self.item_data[idx, :768]
         return SeqBatch(
             user_ids=-1 * torch.ones_like(item_ids.squeeze(0)),

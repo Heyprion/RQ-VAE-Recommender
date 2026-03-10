@@ -26,6 +26,16 @@ class RqVaeOutput(NamedTuple):
     quantize_loss: Tensor
 
 
+class RqVaeLatentOutput(NamedTuple):
+    encoder_output: Tensor
+    embeddings: Tensor
+    quantized_sum: Tensor
+    residuals: Tensor
+    sem_ids: Tensor
+    quantize_loss: Tensor
+    reconstruction: Tensor
+
+
 class RqVaeComputedLosses(NamedTuple):
     loss: Tensor
     reconstruction_loss: Tensor
@@ -111,13 +121,12 @@ class RqVae(nn.Module, PyTorchModelHubMixin):
     def decode(self, x: Tensor) -> Tensor:
         return self.decoder(x)
 
-    def get_semantic_ids(
+    def quantize_encoded(
         self,
-        x: Tensor,
+        encoded: Tensor,
         gumbel_t: float = 0.001
     ) -> RqVaeOutput:
-        res = self.encode(x)
-        
+        res = encoded
         quantize_loss = 0
         embs, residuals, sem_ids = [], [], []
 
@@ -137,13 +146,42 @@ class RqVae(nn.Module, PyTorchModelHubMixin):
             quantize_loss=quantize_loss
         )
 
+    def get_semantic_ids(
+        self,
+        x: Tensor,
+        gumbel_t: float = 0.001
+    ) -> RqVaeOutput:
+        return self.quantize_encoded(self.encode(x), gumbel_t=gumbel_t)
+
+    def encode_with_quantized_embeddings(
+        self,
+        x: Tensor,
+        gumbel_t: float = 0.001
+    ) -> RqVaeLatentOutput:
+        encoded = self.encode(x)
+        quantized = self.quantize_encoded(encoded, gumbel_t=gumbel_t)
+        quantized_sum = quantized.embeddings.sum(axis=-1)
+        reconstruction = self.decode(quantized_sum)
+        reconstruction = torch.cat(
+            [l2norm(reconstruction[..., :-self.n_cat_feats]), reconstruction[..., -self.n_cat_feats:]],
+            axis=-1,
+        )
+        return RqVaeLatentOutput(
+            encoder_output=encoded,
+            embeddings=quantized.embeddings,
+            quantized_sum=quantized_sum,
+            residuals=quantized.residuals,
+            sem_ids=quantized.sem_ids,
+            quantize_loss=quantized.quantize_loss,
+            reconstruction=reconstruction,
+        )
+
     @torch.compile(mode="reduce-overhead")
     def forward(self, batch: SeqBatch, gumbel_t: float) -> RqVaeComputedLosses:
         x = batch.x
-        quantized = self.get_semantic_ids(x, gumbel_t)
-        embs, residuals = quantized.embeddings, quantized.residuals
-        x_hat = self.decode(embs.sum(axis=-1))
-        x_hat = torch.cat([l2norm(x_hat[...,:-self.n_cat_feats]), x_hat[...,-self.n_cat_feats:]], axis=-1)
+        quantized = self.encode_with_quantized_embeddings(x, gumbel_t)
+        embs = quantized.embeddings
+        x_hat = quantized.reconstruction
 
         reconstuction_loss = self.reconstruction_loss(x_hat, x)
         rqvae_loss = quantized.quantize_loss
