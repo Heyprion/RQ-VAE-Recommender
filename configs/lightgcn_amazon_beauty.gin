@@ -1,0 +1,17 @@
+import data.processed
+
+train.iterations=20000
+train.batch_size=2048
+train.learning_rate=0.001
+train.weight_decay=0.0001
+train.l2_reg_weight=0.0001
+train.dataset_folder="dataset/amazon"
+train.dataset=%data.processed.RecDataset.AMAZON
+train.dataset_split="beauty"
+train.save_dir_root="out/lightgcn/amazon_beauty/"
+train.save_model_every=5000
+train.eval_every=5000
+train.embedding_dim=64
+train.n_layers=3
+train.force_dataset_process=False
+train.wandb_logging=False
