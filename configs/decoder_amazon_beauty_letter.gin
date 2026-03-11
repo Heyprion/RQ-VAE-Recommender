@@ -1,27 +1,55 @@
+# 导入数据处理模块，后续会引用其中的 RecDataset 枚举来指定数据集。
 import data.processed
+# 导入模型定义模块，确保本配置里用到的模型相关符号可被 Gin 正确解析。
 import modules.model
 
+# 总训练步数（迭代次数），这里设为 200000 表示训练 20 万个 optimization steps。
 train.iterations=200000
+# 优化器学习率，控制每一步参数更新幅度；0.0003 属于较稳健的中小学习率。
 train.learning_rate=0.0003
+# 权重衰减系数（L2 正则强度），用于抑制过拟合并提升泛化能力。
 train.weight_decay=0.035
+# 每个训练 step 的 batch 大小；256 代表一次喂入 256 条样本。
 train.batch_size=256
+# VAE 输入向量维度；需与上游特征/编码输出维度一致，这里是 768。
 train.vae_input_dim=768
+# VAE 编码器/解码器的多层隐藏维度配置，按 [512,256,128] 逐层压缩。
 train.vae_hidden_dims=[512, 256, 128]
+# VAE 潜变量（embedding）维度，32 维用于在压缩率与信息量之间折中。
 train.vae_embed_dim=32
+# 类别特征数量；0 表示当前输入不包含额外离散类别特征。
 train.vae_n_cat_feats=0
+# 向量量化 codebook 的大小（码字数）；256 表示量化时有 256 个离散原型可选。
 train.vae_codebook_size=256
-train.wandb_logging=False
+# 是否启用 Weights & Biases 在线日志记录；这里与 baseline 对齐为 True。
+train.wandb_logging=True
+# LETTER 版 decoder 需要加载带 collaborative regularization 训练得到的 tokenizer 权重。
 train.pretrained_rqvae_path="out/rqvae/amazon_letter/checkpoint_399999.pt"
+# LETTER 版 decoder 输出目录，保存 decoder checkpoint 与相关日志。
 train.save_dir_root="out/decoder/amazon_letter/"
+# 显式设置模型保存频率为每 5000 步一次，避免沿用训练脚本的 1000000 默认值导致中途无 checkpoint。
+train.save_model_every=5000
+# 数据集根目录路径，代码会在该目录下查找或预处理数据文件。
 train.dataset_folder="dataset/amazon"
+# 指定使用的数据集枚举类型；这里选择 AMAZON 数据集。
 train.dataset=%data.processed.RecDataset.AMAZON
+# 是否强制重新处理数据；False 表示优先复用已处理缓存，节省启动时间。
 train.force_dataset_process=False
+# 全量评估频率（每多少 step 做一次完整评估）；10000 表示每 1 万步。
 train.full_eval_every=10000
+# 部分评估频率（更轻量的评估）；5000 表示每 5000 步做一次快速验证。
 train.partial_eval_every=5000
+# 使用的数据子集/切分名称；"beauty" 表示 Amazon Beauty 子数据集。
 train.dataset_split="beauty"
+# dropout 概率，训练时随机失活部分神经元；0.15 用于减轻过拟合。
 train.dropout_p=0.15
+# 多头注意力的头数；8 头用于并行捕捉不同子空间的关系模式。
 train.attn_heads=8
+# 注意力模块内部表示维度；512 决定每层 self-attention 的宽度。
 train.attn_embed_dim=512
+# 注意力层堆叠层数；8 层代表 decoder Transformer 深度。
 train.attn_layers=8
+# decoder token/item 的嵌入维度；128 决定输入到注意力模块前的表示大小。
 train.decoder_embed_dim=128
+# 是否启用 jagged（变长）序列模式；True 通常用于更高效处理不同长度行为序列。
 train.model_jagged_mode=True

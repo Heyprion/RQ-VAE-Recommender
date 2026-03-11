@@ -1,34 +1,67 @@
+# 导入数据处理模块，供下面数据集枚举与数据构建逻辑引用。
 import data.processed
+# 导入量化模块，供 codebook 前向模式（如 ROTATION_TRICK）枚举引用。
 import modules.quantize
 
+# 总训练步数，400000 表示 RQ-VAE 训练 40 万个优化迭代。
 train.iterations=400000
+# 优化器学习率，0.0005 相对略大于 decoder 配置，用于加快 RQ-VAE 收敛。
 train.learning_rate=0.0005
+# 权重衰减系数（L2 正则），0.01 用于控制模型复杂度并缓解过拟合。
 train.weight_decay=0.01
+# 每个 step 的批大小为 64；RQ-VAE 通常更吃显存，因此 batch 设得更小。
 train.batch_size=64
+# VAE 输入维度，需与上游特征向量维度一致，这里固定为 768。
 train.vae_input_dim=768
+# 输入中的额外类别特征数量；0 表示当前只使用主向量特征。
 train.vae_n_cat_feats=0
+# VAE 隐藏层维度序列，表示网络逐层压缩/变换的通道规模。
 train.vae_hidden_dims=[512, 256, 128]
+# 潜在连续表示维度（embedding 维度）；32 维用于平衡表达能力与量化稳定性。
 train.vae_embed_dim=32
+# codebook 大小（离散码字数量）；256 个码字用于向量量化。
 train.vae_codebook_size=256
+# 是否对 codebook 向量做归一化；False 表示保持原始尺度进行量化匹配。
 train.vae_codebook_normalize=False
+# 是否启用 SimVQ 变体；False 表示使用当前默认的标准量化路径。
 train.vae_sim_vq=False
+# 模型保存频率；每 5000 步保存一次 checkpoint。
 train.save_model_every=5000
+# 评估频率；每 5000 步执行一次验证评估。
 train.eval_every=5000
+# 数据集根目录，训练数据会从该目录读取/构建。
 train.dataset_folder="dataset/amazon"
+# 数据集类型选择为 AMAZON。
 train.dataset=%data.processed.RecDataset.AMAZON
-train.dataset_split="beauty"
+# LETTER 版 RQ-VAE 输出目录，保存带 collaborative regularization 的 tokenizer checkpoint。
 train.save_dir_root="out/rqvae/amazon_letter/"
-train.wandb_logging=False
+# 是否开启 wandb 实验追踪；这里与 baseline 对齐为 True。
+train.wandb_logging=True
+# VQ commitment loss 权重，控制 encoder 输出贴近选中码字的强度。
 train.commitment_weight=0.25
+# VAE 网络层数配置为 3，通常与 hidden_dims 的层级数量对应。
 train.vae_n_layers=3
+# 量化前向策略选择 ROTATION_TRICK，用于改善量化梯度传播/训练稳定性。
 train.vae_codebook_mode=%modules.quantize.QuantizeForwardMode.ROTATION_TRICK
+# 是否强制重新预处理数据；False 表示优先复用已有处理结果。
 train.force_dataset_process=False
+# 使用 Amazon 的 beauty 子集进行训练。
+train.dataset_split="beauty"
+# 是否在训练中执行评估流程；True 表示按 eval_every 定期跑验证。
 train.do_eval=True
+# LETTER 版 tokenizer 以已有 Amazon Beauty RQ-VAE 权重为初始化起点。
 train.pretrained_rqvae_path="trained_models/rqvae_amazon_beauty/checkpoint_399999.pt"
+# offline LightGCN 导出的 item collaborative embedding 路径，供 contrastive alignment 使用。
 train.collab_embeddings_path="out/lightgcn/amazon_beauty/item_embeddings.pt"
+# collaborative loss 的权重 alpha；1.0 表示与 semantic loss 同量级参与优化。
 train.collab_loss_weight=1.0
+# diversity loss 的权重 beta；0.0 表示当前默认关闭该项，便于先稳定跑通。
 train.diversity_loss_weight=0.0
+# contrastive alignment 的温度参数，用于控制相似度 softmax 的平滑程度。
 train.collab_temperature=0.1
+# collaborative 对齐空间的投影维度；将 semantic 与 LightGCN embedding 映射到同一维度对齐。
 train.collab_proj_dim=64
+# LightGCN item embedding 的输入维度；需要与导出的 item_embeddings.pt 保持一致。
 train.lightgcn_embed_dim=64
+# tokenizer 训练时是否使用全量 item；False 表示默认仅用 item train split，避免与原训练设定偏离。
 train.train_on_all_items=False
