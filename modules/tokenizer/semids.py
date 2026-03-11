@@ -66,6 +66,32 @@ class SemanticIdTokenizer(nn.Module):
     
     def reset(self):
         self.cached_ids = None
+
+    def _normalize_batch(self, batch: SeqBatch) -> SeqBatch:
+        ids = batch.ids.unsqueeze(1) if batch.ids.ndim == 1 else batch.ids
+        ids_fut = batch.ids_fut.unsqueeze(1) if batch.ids_fut.ndim == 1 else batch.ids_fut
+        seq_mask = batch.seq_mask.unsqueeze(1) if batch.seq_mask.ndim == 1 else batch.seq_mask
+
+        x = batch.x
+        if x.ndim == 1:
+            x = x.unsqueeze(0)
+
+        x_fut = batch.x_fut
+        if isinstance(x_fut, Tensor) and x_fut.ndim == 1:
+            x_fut = x_fut.unsqueeze(0)
+
+        user_ids = batch.user_ids
+        if user_ids.ndim == 0:
+            user_ids = user_ids.unsqueeze(0)
+
+        return SeqBatch(
+            user_ids=user_ids,
+            ids=ids,
+            ids_fut=ids_fut,
+            x=x,
+            x_fut=x_fut,
+            seq_mask=seq_mask,
+        )
     
     @property
     def sem_ids_dim(self):
@@ -111,7 +137,7 @@ class SemanticIdTokenizer(nn.Module):
         out = torch.zeros(*sem_id_prefix.shape[:-1], dtype=bool, device=sem_id_prefix.device)
         
         # Batch prefixes matching to avoid OOM. 
-        batches = math.ceil(sem_id_prefix.shape[0] // BATCH_SIZE)
+        batches = math.ceil(sem_id_prefix.shape[0] / BATCH_SIZE)
         for i in range(batches):
             prefixes = sem_id_prefix[i*BATCH_SIZE:(i+1)*BATCH_SIZE,...]
             matches = (prefixes.unsqueeze(-2) == prefix_cache.unsqueeze(-3)).all(axis=-1).any(axis=-1)
@@ -125,6 +151,7 @@ class SemanticIdTokenizer(nn.Module):
     @torch.no_grad
     @eval_mode
     def forward(self, batch: SeqBatch) -> TokenizedSeqBatch:
+        batch = self._normalize_batch(batch)
         # TODO: Handle output inconstency in If-else.
         # If block has to return 3-sized ids for use in precompute_corpus_ids
         # Else block has to return deduped 4-sized ids for use in decoder training.
