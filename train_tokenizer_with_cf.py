@@ -59,11 +59,18 @@ def train(
     diversity_loss_weight=0.0,
     collab_temperature=0.1,
     collab_proj_dim=64,
-    lightgcn_embed_dim=64,
+    collab_embedding_dim=None,
+    lightgcn_embed_dim=None,
     train_on_all_items=False,
 ):
     if collab_embeddings_path is None:
         raise ValueError("collab_embeddings_path must be set for train_tokenizer_with_cf.py.")
+    if collab_embedding_dim is None and lightgcn_embed_dim is None:
+        raise ValueError("Set collab_embedding_dim for the collaborative item embedding table.")
+    if collab_embedding_dim is None:
+        collab_embedding_dim = lightgcn_embed_dim
+    elif lightgcn_embed_dim is not None and collab_embedding_dim != lightgcn_embed_dim:
+        raise ValueError("collab_embedding_dim and lightgcn_embed_dim disagree; keep only one value or make them equal.")
 
     if wandb_logging:
         params = locals()
@@ -126,7 +133,7 @@ def train(
     trainer = CollaborativeTokenizerTrainer(
         rq_vae=rqvae,
         collab_embeddings_path=collab_embeddings_path,
-        lightgcn_embed_dim=lightgcn_embed_dim,
+        collab_embedding_dim=collab_embedding_dim,
         collab_proj_dim=collab_proj_dim,
         collab_temperature=collab_temperature,
         collab_loss_weight=collab_loss_weight,
@@ -199,6 +206,11 @@ def train(
             id_diversity_log = {}
             if accelerator.is_main_process and wandb_logging:
                 emb_norms_avg = model_output.embs_norm.mean(axis=0)
+                p_unique_ids = (
+                    model_output.p_unique_ids.detach().cpu().item()
+                    if isinstance(model_output.p_unique_ids, torch.Tensor)
+                    else float(model_output.p_unique_ids)
+                )
                 wandb.log(
                     {
                         "learning_rate": optimizer.param_groups[0]["lr"],
@@ -209,7 +221,7 @@ def train(
                         "reconstruction_loss": model_output.reconstruction_loss.detach().cpu().item(),
                         "rqvae_loss": model_output.rqvae_loss.detach().cpu().item(),
                         "temperature": t,
-                        "p_unique_ids": model_output.p_unique_ids.detach().cpu().item(),
+                        "p_unique_ids": p_unique_ids,
                         **{f"emb_avg_norm_{i}": emb_norms_avg[i].detach().cpu().item() for i in range(vae_n_layers)},
                     },
                     step=iteration,

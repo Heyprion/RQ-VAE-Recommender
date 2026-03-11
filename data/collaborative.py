@@ -12,6 +12,7 @@ class CollaborativeSplit(NamedTuple):
     num_users: int
     num_items: int
     train_edge_index: torch.Tensor
+    train_sequences: list[list[int]]
     train_user_items: list[set[int]]
     train_item_mask: torch.Tensor
     eval_targets: torch.Tensor
@@ -53,8 +54,8 @@ def load_collaborative_split(
     test_targets = history["test"]["itemId_fut"].squeeze(-1).to(torch.long)
 
     user_id_map = {int(user_id): idx for idx, user_id in enumerate(train_users)}
-    user_items = [list(map(int, items)) for items in train_sequences]
-    train_edge_index = _flatten_unique_edges(user_items)
+    user_sequences = [list(map(int, items)) for items in train_sequences]
+    train_edge_index = _flatten_unique_edges(user_sequences)
 
     num_items = raw_data.data["item"]["x"].shape[0]
     train_item_mask = torch.zeros(num_items, dtype=torch.bool)
@@ -65,7 +66,8 @@ def load_collaborative_split(
         num_users=len(train_users),
         num_items=num_items,
         train_edge_index=train_edge_index,
-        train_user_items=[set(items) for items in user_items],
+        train_sequences=user_sequences,
+        train_user_items=[set(items) for items in user_sequences],
         train_item_mask=train_item_mask,
         eval_targets=eval_targets,
         test_targets=test_targets,
@@ -99,4 +101,50 @@ def sample_bpr_batch(
         torch.tensor(users, device=device, dtype=torch.long),
         torch.tensor(pos_items, device=device, dtype=torch.long),
         torch.tensor(neg_items, device=device, dtype=torch.long),
+    )
+
+
+def build_sasrec_training_tensors(
+    train_sequences: list[list[int]],
+    num_items: int,
+    max_len: int,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    seq_batch, pos_batch, neg_batch = [], [], []
+
+    for items in train_sequences:
+        seq = torch.zeros(max_len, dtype=torch.long)
+        pos = torch.zeros(max_len, dtype=torch.long)
+        neg = torch.zeros(max_len, dtype=torch.long)
+
+        if len(items) < 2:
+            seq_batch.append(seq)
+            pos_batch.append(pos)
+            neg_batch.append(neg)
+            continue
+
+        nxt = items[-1]
+        cursor = max_len - 1
+        item_set = set(items)
+        for item in reversed(items[:-1]):
+            seq[cursor] = item + 1
+            pos[cursor] = nxt + 1
+            if nxt >= 0:
+                sampled_neg = random.randrange(num_items)
+                while sampled_neg in item_set:
+                    sampled_neg = random.randrange(num_items)
+                neg[cursor] = sampled_neg + 1
+            nxt = item
+            cursor -= 1
+            if cursor < 0:
+                break
+
+        seq_batch.append(seq)
+        pos_batch.append(pos)
+        neg_batch.append(neg)
+
+    return (
+        torch.stack(seq_batch, dim=0).to(device),
+        torch.stack(pos_batch, dim=0).to(device),
+        torch.stack(neg_batch, dim=0).to(device),
     )

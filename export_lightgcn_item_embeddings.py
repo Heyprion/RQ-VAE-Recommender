@@ -50,14 +50,15 @@ def main() -> None:
     )
 
     with torch.no_grad():
-        item_embeddings = model.compute_embeddings(adjacency).item_embeddings.cpu()
+        item_embeddings = model.compute_embeddings(adjacency).item_embeddings.detach().cpu().clone()
 
     if item_embeddings.shape[0] != collab.num_items:
         raise ValueError(
             f"Exported {item_embeddings.shape[0]} item embeddings, expected {collab.num_items}."
         )
 
-    item_embeddings[~collab.train_item_mask] = 0.0
+    with torch.no_grad():
+        item_embeddings[~collab.train_item_mask] = 0.0
 
     payload = {
         "item_embeddings": item_embeddings,

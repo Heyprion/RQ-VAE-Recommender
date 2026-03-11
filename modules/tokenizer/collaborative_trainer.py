@@ -27,7 +27,7 @@ class CollaborativeTokenizerTrainer(nn.Module):
         self,
         rq_vae: RqVae,
         collab_embeddings_path: str,
-        lightgcn_embed_dim: int,
+        collab_embedding_dim: int,
         collab_proj_dim: int,
         collab_temperature: float = 0.1,
         collab_loss_weight: float = 1.0,
@@ -39,15 +39,15 @@ class CollaborativeTokenizerTrainer(nn.Module):
         self.diversity_loss_weight = diversity_loss_weight
 
         payload = torch.load(collab_embeddings_path, map_location="cpu", weights_only=False)
-        if payload["embedding_dim"] != lightgcn_embed_dim:
+        if payload["embedding_dim"] != collab_embedding_dim:
             raise ValueError(
-                f"Expected LightGCN embedding dim {lightgcn_embed_dim}, found {payload['embedding_dim']} in {collab_embeddings_path}."
+                f"Expected collaborative embedding dim {collab_embedding_dim}, found {payload['embedding_dim']} in {collab_embeddings_path}."
             )
         self.register_buffer("collab_item_embeddings", payload["item_embeddings"].to(torch.float32), persistent=False)
         self.register_buffer("collab_item_mask", payload["item_mask"].to(torch.bool), persistent=False)
 
         self.semantic_projector = nn.Linear(rq_vae.embed_dim, collab_proj_dim, bias=False)
-        self.collab_projector = nn.Linear(lightgcn_embed_dim, collab_proj_dim, bias=False)
+        self.collab_projector = nn.Linear(collab_embedding_dim, collab_proj_dim, bias=False)
         self.collaborative_loss = ContrastiveAlignmentLoss(temperature=collab_temperature)
         self.diversity_loss = CodebookDiversityLoss(codebook_size=rq_vae.codebook_size)
 
