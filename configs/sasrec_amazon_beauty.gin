@@ -1,0 +1,35 @@
+# 导入数据处理模块，供下面数据集枚举与数据构建逻辑引用。
+import data.processed
+
+# 总训练步数，20000 表示 SASRec 训练 2 万个优化迭代。
+train.iterations=20000
+# 每个训练 step 的用户序列 batch 大小；256 代表一次采样 256 个用户序列。
+train.batch_size=256
+# 优化器学习率；0.001 用于 SASRec 的 Adam 优化。
+train.learning_rate=0.001
+# 权重衰减系数（L2 正则）；0.0 表示不额外施加权重衰减。
+train.weight_decay=0.0
+# 数据集根目录，训练数据会从该目录读取/构建。
+train.dataset_folder="dataset/amazon"
+# 数据集类型选择为 AMAZON。
+train.dataset=%data.processed.RecDataset.AMAZON
+# 使用 Amazon 的 beauty 子集进行训练。
+train.dataset_split="beauty"
+# SASRec 实验输出目录，包含 checkpoint 与日志。
+train.save_dir_root="out/sasrec/amazon_beauty/"
+# 模型保存频率；每 5000 步保存一次 checkpoint。
+train.save_model_every=5000
+# SASRec 输入的最大序列长度；超过该长度的历史会从尾部截断。
+train.max_seq_len=50
+# SASRec item embedding / hidden state 维度；64 维用于与 collaborative 对齐维度保持一致。
+train.hidden_size=64
+# SASRec Transformer block 数量；2 层作为最小稳定配置。
+train.num_blocks=2
+# SASRec 多头注意力头数；2 头用于划分子空间建模序列依赖。
+train.num_heads=2
+# SASRec dropout 概率；0.2 用于缓解过拟合。
+train.dropout=0.2
+# 是否强制重新预处理数据；False 表示优先复用已有处理结果。
+train.force_dataset_process=False
+# 是否开启 wandb 实验追踪；True 表示上传训练指标到 wandb。
+train.wandb_logging=True
