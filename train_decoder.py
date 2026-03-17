@@ -11,6 +11,7 @@ from data.processed import SeqData
 from data.utils import batch_to
 from data.utils import cycle
 from data.utils import next_batch
+from modules.context_routed_model import ContextRoutedEncoderDecoderRetrievalModel
 from evaluate.metrics import TopKAccumulator
 from modules.model import EncoderDecoderRetrievalModel
 from modules.scheduler.inv_sqrt import InverseSquareRootScheduler
@@ -62,13 +63,34 @@ def train(
     push_vae_to_hf=False,
     train_data_subsample=True,
     model_jagged_mode=True,
-    vae_hf_model_name="edobotta/rqvae-amazon-beauty"
+    vae_hf_model_name="edobotta/rqvae-amazon-beauty",
+    use_multi_aspect_sid=False,
+    use_context_router=True,
+    num_aspects=4,
+    router_hidden_dim=128,
+    branch_hidden_dim=0,
+    history_max_items=20,
+    history_branch_warmup=1,
+    freeze_base_quantizer=True,
+    loss_ntp_weight=1.0,
+    loss_div_weight=0.0,
+    loss_orth_weight=0.0,
+    loss_router_weight=0.0,
+    stage1_rqvae_path=None,
+    stage2_resume_path=None,
 ):  
     if dataset != RecDataset.AMAZON:
         raise Exception(f"Dataset currently not supported: {dataset}.")
 
     if wandb_logging:
         params = locals()
+
+    if stage1_rqvae_path is not None:
+        pretrained_rqvae_path = stage1_rqvae_path
+    if stage2_resume_path is not None:
+        pretrained_decoder_path = stage2_resume_path
+    if use_multi_aspect_sid and not use_context_router:
+        loss_router_weight = 0.0
 
     accelerator = Accelerator(
         split_batches=split_batches,
@@ -123,30 +145,56 @@ def train(
         n_cat_feats=vae_n_cat_feats,
         rqvae_weights_path=pretrained_rqvae_path,
         rqvae_codebook_normalize=vae_codebook_normalize,
-        rqvae_sim_vq=vae_sim_vq
+        rqvae_sim_vq=vae_sim_vq,
+        use_multi_aspect_sid=use_multi_aspect_sid,
     )
-    tokenizer = accelerator.prepare(tokenizer)
+    tokenizer = tokenizer.to(device)
     tokenizer.precompute_corpus_ids(item_dataset)
     
     if push_vae_to_hf:
         login()
         tokenizer.rq_vae.push_to_hub(vae_hf_model_name)
 
-    model = EncoderDecoderRetrievalModel(
-        embedding_dim=decoder_embed_dim,
-        attn_dim=attn_embed_dim,
-        dropout=dropout_p,
-        num_heads=attn_heads,
-        n_layers=attn_layers,
-        num_embeddings=vae_codebook_size,
-        inference_verifier_fn=lambda x: tokenizer.exists_prefix(x),
-        sem_id_dim=tokenizer.sem_ids_dim,
-        max_pos=train_dataset.max_seq_len*tokenizer.sem_ids_dim,
-        jagged_mode=model_jagged_mode
-    )
+    if use_multi_aspect_sid:
+        model = ContextRoutedEncoderDecoderRetrievalModel(
+            embedding_dim=decoder_embed_dim,
+            attn_dim=attn_embed_dim,
+            dropout=dropout_p,
+            num_heads=attn_heads,
+            n_layers=attn_layers,
+            num_embeddings=vae_codebook_size,
+            inference_verifier_fn=lambda x: tokenizer.exists_prefix(x),
+            sem_id_dim=tokenizer.sem_ids_dim,
+            max_pos=train_dataset.max_seq_len * tokenizer.sem_ids_dim,
+            rqvae=tokenizer.rq_vae,
+            num_aspects=num_aspects,
+            router_hidden_dim=router_hidden_dim,
+            branch_hidden_dim=branch_hidden_dim,
+            history_max_items=history_max_items,
+            history_branch_warmup=history_branch_warmup,
+            loss_ntp_weight=loss_ntp_weight,
+            loss_div_weight=loss_div_weight,
+            loss_orth_weight=loss_orth_weight,
+            loss_router_weight=loss_router_weight,
+            freeze_base_quantizer=freeze_base_quantizer,
+            use_context_router=use_context_router,
+        )
+    else:
+        model = EncoderDecoderRetrievalModel(
+            embedding_dim=decoder_embed_dim,
+            attn_dim=attn_embed_dim,
+            dropout=dropout_p,
+            num_heads=attn_heads,
+            n_layers=attn_layers,
+            num_embeddings=vae_codebook_size,
+            inference_verifier_fn=lambda x: tokenizer.exists_prefix(x),
+            sem_id_dim=tokenizer.sem_ids_dim,
+            max_pos=train_dataset.max_seq_len*tokenizer.sem_ids_dim,
+            jagged_mode=model_jagged_mode
+        )
 
     optimizer = AdamW(
-        params=model.parameters(),
+        params=[p for p in model.parameters() if p.requires_grad],
         lr=learning_rate,
         weight_decay=weight_decay
     )
@@ -188,10 +236,24 @@ def train(
                     total_loss += loss
                 
                 if wandb_logging and accelerator.is_main_process:
-                    train_debug_metrics = compute_debug_metrics(tokenized_data, model_output)
+                    if use_multi_aspect_sid:
+                        valid_history = model_output.teacher_branch_idx >= 0
+                        teacher_branch_idx = model_output.teacher_branch_idx[valid_history]
+                        selected_branch_idx = model_output.selected_branch_idx[valid_history]
+                        train_debug_metrics = {
+                            "loss_ntp": model_output.loss_ntp.detach().cpu().item(),
+                            "loss_div": model_output.loss_div.detach().cpu().item(),
+                            "loss_orth": model_output.loss_orth.detach().cpu().item(),
+                            "loss_router": model_output.loss_router.detach().cpu().item(),
+                            "history_teacher_branch_idx_mean": teacher_branch_idx.to(torch.float32).mean().detach().cpu().item() if teacher_branch_idx.numel() > 0 else -1.0,
+                            "history_selected_branch_idx_mean": selected_branch_idx.to(torch.float32).mean().detach().cpu().item() if selected_branch_idx.numel() > 0 else -1.0,
+                            "target_branch_idx_mean": model_output.target_branch_idx.to(torch.float32).mean().detach().cpu().item(),
+                        }
+                    else:
+                        train_debug_metrics = compute_debug_metrics(tokenized_data, model_output)
 
                 accelerator.backward(total_loss)
-                assert model.sem_id_embedder.emb.weight.grad is not None
+                assert accelerator.unwrap_model(model).sem_id_embedder.emb.weight.grad is not None
 
             pbar.set_description(f'loss: {total_loss.item():.4f}')
 
@@ -204,7 +266,7 @@ def train(
 
             if (iter+1) % partial_eval_every == 0:
                 model.eval()
-                model.enable_generation = False
+                accelerator.unwrap_model(model).enable_generation = False
                 for batch in eval_dataloader:
                     data = batch_to(batch, device)
                     tokenized_data = tokenizer(data)
@@ -213,24 +275,47 @@ def train(
                         model_output_eval = model(tokenized_data)
 
                     if wandb_logging and accelerator.is_main_process:
-                        eval_debug_metrics = compute_debug_metrics(tokenized_data, model_output_eval, "eval")
-                        eval_debug_metrics["eval_loss"] = model_output_eval.loss.detach().cpu().item()
+                        if use_multi_aspect_sid:
+                            valid_history = model_output_eval.teacher_branch_idx >= 0
+                            teacher_branch_idx = model_output_eval.teacher_branch_idx[valid_history]
+                            selected_branch_idx = model_output_eval.selected_branch_idx[valid_history]
+                            eval_debug_metrics = {
+                                "eval_loss": model_output_eval.loss.detach().cpu().item(),
+                                "eval_loss_ntp": model_output_eval.loss_ntp.detach().cpu().item(),
+                                "eval_loss_div": model_output_eval.loss_div.detach().cpu().item(),
+                                "eval_loss_orth": model_output_eval.loss_orth.detach().cpu().item(),
+                                "eval_loss_router": model_output_eval.loss_router.detach().cpu().item(),
+                                "eval_history_teacher_branch_idx_mean": teacher_branch_idx.to(torch.float32).mean().detach().cpu().item() if teacher_branch_idx.numel() > 0 else -1.0,
+                                "eval_history_selected_branch_idx_mean": selected_branch_idx.to(torch.float32).mean().detach().cpu().item() if selected_branch_idx.numel() > 0 else -1.0,
+                                "eval_target_branch_idx_mean": model_output_eval.target_branch_idx.to(torch.float32).mean().detach().cpu().item(),
+                            }
+                        else:
+                            eval_debug_metrics = compute_debug_metrics(tokenized_data, model_output_eval, "eval")
+                            eval_debug_metrics["eval_loss"] = model_output_eval.loss.detach().cpu().item()
                         wandb.log(eval_debug_metrics)
 
             if (iter+1) % full_eval_every == 0:
                 model.eval()
-                model.enable_generation = True
+                unwrapped_model = accelerator.unwrap_model(model)
+                unwrapped_model.enable_generation = True
+                if use_multi_aspect_sid:
+                    tokenizer.precompute_multi_aspect_corpus_ids(item_dataset, unwrapped_model.branch_encoder)
                 with tqdm(eval_dataloader, desc=f'Eval {iter+1}', disable=not accelerator.is_main_process) as pbar_eval:
                     for batch in pbar_eval:
                         data = batch_to(batch, device)
                         tokenized_data = tokenizer(data)
 
-                        generated = model.generate_next_sem_id(tokenized_data, top_k=True, temperature=1)
-                        actual, top_k = tokenized_data.sem_ids_fut, generated.sem_ids
+                        if use_multi_aspect_sid:
+                            history_batch = unwrapped_model.build_generation_history_batch(tokenized_data)
+                            generated = unwrapped_model.generate_next_sem_id(history_batch, top_k=True, temperature=1)
+                            actual, top_k = unwrapped_model.select_target_full_ids(tokenized_data), generated.sem_ids
+                        else:
+                            generated = unwrapped_model.generate_next_sem_id(tokenized_data, top_k=True, temperature=1)
+                            actual, top_k = tokenized_data.sem_ids_fut, generated.sem_ids
 
                         metrics_accumulator.accumulate(actual=actual, top_k=top_k)
 
-                        if accelerator.is_main_process and wandb_logging:
+                        if accelerator.is_main_process and wandb_logging and not use_multi_aspect_sid:
                             wandb.log(eval_debug_metrics)
                 
                 eval_metrics = metrics_accumulator.reduce()

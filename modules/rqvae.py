@@ -10,6 +10,7 @@ from modules.loss import QuantizeLoss
 from modules.normalize import l2norm
 from modules.quantize import Quantize
 from modules.quantize import QuantizeForwardMode
+from modules.quantize import QuantizeOutput
 from huggingface_hub import PyTorchModelHubMixin
 from typing import List
 from typing import NamedTuple
@@ -136,6 +137,25 @@ class RqVae(nn.Module, PyTorchModelHubMixin):
             sem_ids=rearrange(sem_ids, "b d -> d b"),
             quantize_loss=quantize_loss
         )
+
+    def get_base_semantic_ids(
+        self,
+        x: Tensor,
+        gumbel_t: float = 0.001
+    ) -> Tensor:
+        return self.get_semantic_ids(x, gumbel_t=gumbel_t).sem_ids
+
+    def quantize_first_layer(
+        self,
+        x: Tensor,
+        gumbel_t: float = 0.001
+    ) -> QuantizeOutput:
+        return self.layers[0](x, temperature=gumbel_t)
+
+    def freeze_quantizer(self) -> None:
+        for layer in self.layers:
+            layer.requires_grad_(False)
+            layer.eval()
 
     @torch.compile(mode="reduce-overhead")
     def forward(self, batch: SeqBatch, gumbel_t: float) -> RqVaeComputedLosses:

@@ -19,3 +19,14 @@ class TokenizedSeqBatch(NamedTuple):
     seq_mask: Tensor
     token_type_ids: Tensor
     token_type_ids_fut: Tensor
+
+
+class MultiAspectTokenizedSeqBatch(NamedTuple):
+    user_ids: Tensor
+    base_sem_ids: Tensor
+    base_sem_ids_fut: Tensor
+    seq_mask: Tensor
+    history_ids: Tensor
+    future_ids: Tensor
+    history_x: Tensor
+    future_x: Tensor

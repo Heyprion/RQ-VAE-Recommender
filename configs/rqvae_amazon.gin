@@ -3,6 +3,10 @@ import data.processed
 # 导入量化模块，供 codebook 前向模式（如 ROTATION_TRICK）枚举引用。
 import modules.quantize
 
+
+train.amp=True
+train.mixed_precision_type="bf16"
+
 # 总训练步数，400000 表示 RQ-VAE 训练 40 万个优化迭代。
 train.iterations=400000
 # 优化器学习率，0.0005 相对略大于 decoder 配置，用于加快 RQ-VAE 收敛。
@@ -26,9 +30,9 @@ train.vae_codebook_normalize=False
 # 是否启用 SimVQ 变体；False 表示使用当前默认的标准量化路径。
 train.vae_sim_vq=False
 # 模型保存频率；每 5000 步保存一次 checkpoint。
-train.save_model_every=5000
+train.save_model_every=10000
 # 评估频率；每 5000 步执行一次验证评估。
-train.eval_every=5000
+train.eval_every=100000
 # 数据集根目录，训练数据会从该目录读取/构建。
 train.dataset_folder="dataset/amazon"
 # 数据集类型选择为 AMAZON。

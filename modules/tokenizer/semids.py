@@ -3,6 +3,7 @@ import torch
 
 from data.processed import ItemData
 from data.processed import SeqData
+from data.schemas import MultiAspectTokenizedSeqBatch
 from data.schemas import SeqBatch
 from data.schemas import TokenizedSeqBatch
 from data.utils import batch_to
@@ -35,7 +36,8 @@ class SemanticIdTokenizer(nn.Module):
         commitment_weight: float = 0.25,
         rqvae_weights_path: Optional[str] = None,
         rqvae_codebook_normalize: bool = False,
-        rqvae_sim_vq: bool = False
+        rqvae_sim_vq: bool = False,
+        use_multi_aspect_sid: bool = False,
     ) -> None:
         super().__init__()
 
@@ -59,6 +61,7 @@ class SemanticIdTokenizer(nn.Module):
 
         self.codebook_size = codebook_size
         self.n_layers = n_layers
+        self.use_multi_aspect_sid = use_multi_aspect_sid
         self.reset()
     
     def _get_hits(self, query: Tensor, key: Tensor) -> Tensor:
@@ -66,6 +69,7 @@ class SemanticIdTokenizer(nn.Module):
     
     def reset(self):
         self.cached_ids = None
+        self.cached_base_ids = None
     
     @property
     def sem_ids_dim(self):
@@ -74,6 +78,20 @@ class SemanticIdTokenizer(nn.Module):
     @torch.no_grad
     @eval_mode
     def precompute_corpus_ids(self, movie_dataset: ItemData) -> Tensor:
+        if self.use_multi_aspect_sid:
+            cached_base_ids = []
+            sampler = BatchSampler(
+                SequentialSampler(range(len(movie_dataset))), batch_size=512, drop_last=False
+            )
+            dataloader = DataLoader(movie_dataset, sampler=sampler, shuffle=False, collate_fn=lambda batch: batch[0])
+            for batch in dataloader:
+                batch = batch_to(batch, self.rq_vae.device)
+                batch_ids = self.rq_vae.get_base_semantic_ids(batch.x)
+                cached_base_ids.append(batch_ids)
+
+            self.cached_base_ids = torch.cat(cached_base_ids, dim=0)
+            return self.cached_base_ids
+
         cached_ids = None
         dedup_dim = []
         sampler = BatchSampler(
@@ -102,6 +120,39 @@ class SemanticIdTokenizer(nn.Module):
 
     @torch.no_grad
     @eval_mode
+    def precompute_multi_aspect_corpus_ids(
+        self,
+        movie_dataset: ItemData,
+        branch_encoder: nn.Module,
+        gumbel_t: float = 0.001,
+    ) -> Tensor:
+        if not self.use_multi_aspect_sid:
+            raise Exception("Multi-aspect corpus ids requested while tokenizer is in baseline mode.")
+
+        candidate_ids = []
+        sampler = BatchSampler(
+            SequentialSampler(range(len(movie_dataset))), batch_size=512, drop_last=False
+        )
+        dataloader = DataLoader(movie_dataset, sampler=sampler, shuffle=False, collate_fn=lambda batch: batch[0])
+        for batch in dataloader:
+            batch = batch_to(batch, self.rq_vae.device)
+            base_ids = self.rq_vae.get_base_semantic_ids(batch.x, gumbel_t=gumbel_t)
+            base_repr = self.rq_vae.encode(batch.x)
+            aspect_embs = branch_encoder(base_repr)
+            flat_aspects = rearrange(aspect_embs, "b m d -> (b m) d")
+            branch_ids = self.rq_vae.quantize_first_layer(flat_aspects, gumbel_t=gumbel_t).ids
+            branch_ids = rearrange(branch_ids, "(b m) -> b m", b=base_ids.shape[0])
+            full_ids = torch.cat([
+                base_ids.unsqueeze(1).expand(-1, branch_ids.shape[1], -1),
+                branch_ids.unsqueeze(-1)
+            ], dim=-1)
+            candidate_ids.append(rearrange(full_ids, "b m d -> (b m) d"))
+
+        self.cached_ids = torch.cat(candidate_ids, dim=0)
+        return self.cached_ids
+
+    @torch.no_grad
+    @eval_mode
     def exists_prefix(self, sem_id_prefix: Tensor) -> Tensor:
         if self.cached_ids is None:
             raise Exception("No match can be found in empty cache.")
@@ -111,7 +162,7 @@ class SemanticIdTokenizer(nn.Module):
         out = torch.zeros(*sem_id_prefix.shape[:-1], dtype=bool, device=sem_id_prefix.device)
         
         # Batch prefixes matching to avoid OOM. 
-        batches = math.ceil(sem_id_prefix.shape[0] // BATCH_SIZE)
+        batches = math.ceil(sem_id_prefix.shape[0] / BATCH_SIZE)
         for i in range(batches):
             prefixes = sem_id_prefix[i*BATCH_SIZE:(i+1)*BATCH_SIZE,...]
             matches = (prefixes.unsqueeze(-2) == prefix_cache.unsqueeze(-3)).all(axis=-1).any(axis=-1)
@@ -121,10 +172,54 @@ class SemanticIdTokenizer(nn.Module):
     
     def _tokenize_seq_batch_from_cached(self, ids: Tensor) -> Tensor:
         return rearrange(self.cached_ids[ids.flatten(), :], "(b n) d -> b (n d)", n=ids.shape[1])
-    
+
+    def _lookup_cached_base_ids(self, ids: Tensor) -> Tensor:
+        if self.cached_base_ids is None:
+            raise Exception("Base ids cache is empty.")
+
+        out = -1 * torch.ones(*ids.shape, self.n_layers, device=ids.device, dtype=torch.long)
+        valid = ids >= 0
+        if valid.any():
+            out[valid] = self.cached_base_ids[ids[valid]]
+        return out
+
+    def _compute_base_ids_from_features(self, x: Tensor) -> Tensor:
+        x_shape = x.shape[:-1]
+        x_flat = rearrange(x, "... d -> (...) d")
+        valid = (x_flat != -1).all(dim=-1)
+
+        base_ids = -1 * torch.ones(x_flat.shape[0], self.n_layers, device=x.device, dtype=torch.long)
+        if valid.any():
+            base_ids[valid] = self.rq_vae.get_base_semantic_ids(x_flat[valid])
+
+        return base_ids.reshape(*x_shape, self.n_layers)
+
     @torch.no_grad
     @eval_mode
-    def forward(self, batch: SeqBatch) -> TokenizedSeqBatch:
+    def forward(self, batch: SeqBatch) -> TokenizedSeqBatch | MultiAspectTokenizedSeqBatch:
+        if self.use_multi_aspect_sid:
+            history_ids = batch.ids
+            future_ids = batch.ids_fut.squeeze(-1)
+            future_x = batch.x_fut.squeeze(1)
+
+            if self.cached_base_ids is None or history_ids.max() >= self.cached_base_ids.shape[0]:
+                base_sem_ids = self._compute_base_ids_from_features(batch.x)
+                base_sem_ids_fut = self._compute_base_ids_from_features(future_x)
+            else:
+                base_sem_ids = self._lookup_cached_base_ids(history_ids)
+                base_sem_ids_fut = self._lookup_cached_base_ids(batch.ids_fut).squeeze(1)
+
+            return MultiAspectTokenizedSeqBatch(
+                user_ids=batch.user_ids,
+                base_sem_ids=base_sem_ids,
+                base_sem_ids_fut=base_sem_ids_fut,
+                seq_mask=batch.seq_mask,
+                history_ids=history_ids,
+                future_ids=future_ids,
+                history_x=batch.x,
+                future_x=future_x
+            )
+
         # TODO: Handle output inconstency in If-else.
         # If block has to return 3-sized ids for use in precompute_corpus_ids
         # Else block has to return deduped 4-sized ids for use in decoder training.

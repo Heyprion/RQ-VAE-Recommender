@@ -160,8 +160,8 @@ class EncoderDecoderRetrievalModel(nn.Module):
 
         B, N = batch.sem_ids.shape
         generated, log_probas = None, 0
-        k = 64 if top_k else 1
-        n_top_k_candidates = 256 if top_k else 1
+        n_top_k_candidates = min(self.num_embeddings, 256) if top_k else 1
+        k = min(64, n_top_k_candidates) if top_k else 1
 
         input_batch = TokenizedSeqBatch(
             user_ids=batch.user_ids,

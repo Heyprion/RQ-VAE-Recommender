@@ -1,0 +1,46 @@
+import data.processed
+import modules.model
+
+train.amp=True
+train.mixed_precision_type="bf16"
+
+train.iterations=200000
+train.learning_rate=0.0003
+train.weight_decay=0.035
+train.batch_size=256
+
+train.vae_input_dim=768
+train.vae_hidden_dims=[512, 256, 128]
+train.vae_embed_dim=32
+train.vae_n_cat_feats=0
+train.vae_codebook_size=256
+
+train.pretrained_rqvae_path="trained_models/rqvae_amazon_beauty/checkpoint_399999.pt"
+train.save_dir_root="out/decoder/amazon_multi_aspect/"
+train.dataset_folder="dataset/amazon"
+train.dataset=%data.processed.RecDataset.AMAZON
+train.force_dataset_process=False
+train.full_eval_every=50000
+train.partial_eval_every=50000
+train.dataset_split="beauty"
+
+train.dropout_p=0.15
+train.attn_heads=8
+train.attn_embed_dim=512
+train.attn_layers=8
+train.decoder_embed_dim=128
+train.model_jagged_mode=True
+
+train.use_multi_aspect_sid=True
+train.use_context_router=True
+train.num_aspects=4
+train.router_hidden_dim=256
+train.branch_hidden_dim=128
+train.history_max_items=20
+train.history_branch_warmup=1
+train.freeze_base_quantizer=True
+
+train.loss_ntp_weight=1.0
+train.loss_div_weight=0.01
+train.loss_orth_weight=0.01
+train.loss_router_weight=1.0
