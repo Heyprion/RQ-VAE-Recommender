@@ -51,6 +51,10 @@ class EncoderDecoderRetrievalModel(nn.Module):
         inference_verifier_fn,
         max_pos=2048,
         jagged_mode: bool = True,
+        use_multi_sid: bool = False,
+        use_sid_hard_selection: bool = False,
+        sid_selection_context_len: int = 20,
+        sid_selection_min_history: int = 1,
     ) -> None:
         super().__init__()
 
@@ -60,6 +64,10 @@ class EncoderDecoderRetrievalModel(nn.Module):
         self.attn_dim = attn_dim
         self.inference_verifier_fn = inference_verifier_fn
         self.enable_generation = False
+        self.use_multi_sid = use_multi_sid
+        self.use_sid_hard_selection = use_sid_hard_selection
+        self.sid_selection_context_len = sid_selection_context_len
+        self.sid_selection_min_history = sid_selection_min_history
 
         self.bos_emb = nn.Parameter(torch.rand(embedding_dim))
         self.norm = RMSNorm(embedding_dim)
@@ -97,9 +105,180 @@ class EncoderDecoderRetrievalModel(nn.Module):
         self.in_proj = nn.Linear(embedding_dim, attn_dim, bias=False)
         self.in_proj_context = nn.Linear(embedding_dim, attn_dim, bias=False)
         self.out_proj = nn.Linear(attn_dim, num_embeddings, bias=False)
+
+    def _get_user_emb(self, user_ids: Tensor) -> Tensor:
+        user_emb = self.user_id_embedder(user_ids)
+        if user_emb.dim() == 2:
+            user_emb = user_emb.unsqueeze(1)
+        return user_emb
+
+    def _get_projected_user_context(self, user_ids: Tensor) -> Tensor:
+        user_emb = self._get_user_emb(user_ids)
+        return self.in_proj_context(self.do(self.norm(user_emb))).squeeze(1)
+
+    def _repeat_optional(self, x: Tensor, repeats: int) -> Tensor:
+        if x is None:
+            return None
+        return x.repeat_interleave(repeats, dim=0)
+
+    def _encode_history_context(
+        self,
+        user_ids: Tensor,
+        selected_sid: Tensor,
+        item_seq_mask: Tensor
+    ) -> Tensor:
+        if selected_sid.shape[1] == 0:
+            return self._get_projected_user_context(user_ids)
+
+        B, num_items, sem_id_dim = selected_sid.shape
+        seq_mask = item_seq_mask.repeat_interleave(sem_id_dim, dim=1)
+        sem_ids = rearrange(selected_sid, "b n d -> b (n d)").clone()
+        sem_ids[~seq_mask] = -1
+        token_type_ids = torch.arange(sem_id_dim, device=sem_ids.device).repeat(B, num_items)
+
+        sem_ids_emb = self.sem_id_embedder.embed_sem_ids(sem_ids, token_type_ids)
+        user_emb = self._get_user_emb(user_ids)
+
+        pos = torch.arange(sem_ids_emb.shape[1], device=sem_ids_emb.device).unsqueeze(0)
+        input_embedding = torch.cat([user_emb, self.wpe(pos) + sem_ids_emb], axis=1)
+
+        if self.jagged_mode:
+            seq_lengths = seq_mask.sum(axis=1) + 1
+            input_embedding = padded_to_jagged_tensor(
+                input_embedding,
+                lengths=seq_lengths,
+                max_len=input_embedding.shape[1]
+            )
+            transformer_context = self.in_proj_context(self.do(self.norm(input_embedding)))
+            encoder_output = self.transformer.encoder(
+                transformer_context,
+                padding_mask=seq_mask,
+                is_causal=False,
+                context=None,
+                jagged=True
+            )
+            flattened_encoder_output = jagged_to_flattened_tensor(encoder_output)
+            offsets = encoder_output.offsets().to(torch.long)
+            return flattened_encoder_output[offsets[1:] - 1]
+
+        transformer_context = self.in_proj_context(self.do(self.norm(input_embedding)))
+        mem_mask = torch.cat([
+            torch.ones(B, 1, dtype=torch.bool, device=item_seq_mask.device),
+            seq_mask
+        ], axis=1)
+        encoder_output = self.transformer.encoder(
+            transformer_context,
+            src_key_padding_mask=~mem_mask
+        )
+        row_idx = torch.arange(B, device=encoder_output.device)
+        seq_lengths = mem_mask.sum(dim=1).to(torch.long) - 1
+        return encoder_output[row_idx, seq_lengths, :]
+
+    @torch.no_grad()
+    def _apply_history_sid_selection(self, batch: TokenizedSeqBatch) -> TokenizedSeqBatch:
+        if not (
+            self.use_multi_sid and
+            self.use_sid_hard_selection and
+            batch.multi_sids is not None and
+            batch.item_seq_mask is not None
+        ):
+            return batch
+
+        B, num_items, _, sem_id_dim = batch.multi_sids.shape
+        device = batch.sem_ids.device
+        row_idx = torch.arange(B, device=device)
+
+        selected_sid = batch.multi_sids[:, :, 0, :].clone()
+        selected_sid_idx = torch.zeros(B, num_items, dtype=torch.long, device=device)
+
+        sid_embs = self.sem_id_embedder.embed_sem_ids(batch.multi_sids)[..., :-1, :].sum(dim=-2)
+        selected_sid_emb = torch.zeros(
+            B,
+            num_items,
+            sid_embs.shape[-1],
+            dtype=sid_embs.dtype,
+            device=sid_embs.device
+        )
+
+        for item_pos in range(num_items):
+            context_start = max(0, item_pos - self.sid_selection_context_len)
+            context_mask = batch.item_seq_mask[:, context_start:item_pos]
+            valid_history_count = context_mask.sum(dim=1)
+            use_canonical = valid_history_count < self.sid_selection_min_history
+            current_selected_sid_idx = torch.zeros(B, dtype=torch.long, device=device)
+
+            if not use_canonical.all():
+                context_repr = self._encode_history_context(
+                    user_ids=batch.user_ids,
+                    selected_sid=selected_sid[:, context_start:item_pos, :],
+                    item_seq_mask=context_mask
+                )
+                current_sid_embs = sid_embs[:, item_pos, :, :]
+                current_sid_repr = self.in_proj_context(self.do(self.norm(current_sid_embs)))
+                attention_scores = (context_repr.unsqueeze(1) * current_sid_repr).sum(dim=-1)
+                attention_probs = torch.softmax(attention_scores, dim=-1)
+                current_selected_sid_idx = attention_probs.argmax(dim=-1)
+                current_selected_sid_idx = torch.where(
+                    use_canonical,
+                    torch.zeros_like(current_selected_sid_idx),
+                    current_selected_sid_idx
+                )
+            else:
+                current_sid_embs = sid_embs[:, item_pos, :, :]
+
+            selected_sid_idx[:, item_pos] = current_selected_sid_idx
+            selected_sid[:, item_pos, :] = batch.multi_sids[row_idx, item_pos, current_selected_sid_idx, :]
+            selected_sid_emb[:, item_pos, :] = current_sid_embs[row_idx, current_selected_sid_idx, :]
+
+            invalid_rows = ~batch.item_seq_mask[:, item_pos]
+            if invalid_rows.any():
+                selected_sid_idx[invalid_rows, item_pos] = 0
+                selected_sid[invalid_rows, item_pos, :] = -1
+                selected_sid_emb[invalid_rows, item_pos, :] = 0
+
+        selected_sem_ids = rearrange(selected_sid, "b n d -> b (n d)")
+        selected_seq_mask = batch.item_seq_mask.repeat_interleave(sem_id_dim, dim=1)
+        selected_sem_ids[~selected_seq_mask] = -1
+        selected_token_type_ids = torch.arange(sem_id_dim, device=device).repeat(B, num_items)
+
+        return TokenizedSeqBatch(
+            user_ids=batch.user_ids,
+            sem_ids=selected_sem_ids,
+            seq_mask=selected_seq_mask,
+            token_type_ids=selected_token_type_ids,
+            sem_ids_fut=batch.sem_ids_fut,
+            token_type_ids_fut=batch.token_type_ids_fut,
+            item_ids=batch.item_ids,
+            item_ids_fut=batch.item_ids_fut,
+            item_seq_mask=batch.item_seq_mask,
+            multi_sids=None,
+            multi_sids_fut=batch.multi_sids_fut
+        )
+
+    def _expand_multi_target_batch(self, batch: TokenizedSeqBatch) -> tuple[TokenizedSeqBatch, int]:
+        num_targets = batch.multi_sids_fut.shape[1]
+        expanded_sem_ids_fut = rearrange(batch.multi_sids_fut, "b m d -> (b m) d")
+        expanded_token_type_ids_fut = torch.arange(
+            expanded_sem_ids_fut.shape[1],
+            device=expanded_sem_ids_fut.device
+        ).repeat(expanded_sem_ids_fut.shape[0], 1)
+
+        return TokenizedSeqBatch(
+            user_ids=batch.user_ids.repeat_interleave(num_targets, dim=0),
+            sem_ids=batch.sem_ids.repeat_interleave(num_targets, dim=0),
+            seq_mask=batch.seq_mask.repeat_interleave(num_targets, dim=0),
+            token_type_ids=batch.token_type_ids.repeat_interleave(num_targets, dim=0),
+            sem_ids_fut=expanded_sem_ids_fut,
+            token_type_ids_fut=expanded_token_type_ids_fut,
+            item_ids=self._repeat_optional(batch.item_ids, num_targets),
+            item_ids_fut=self._repeat_optional(batch.item_ids_fut, num_targets),
+            item_seq_mask=self._repeat_optional(batch.item_seq_mask, num_targets),
+            multi_sids=None,
+            multi_sids_fut=None
+        ), num_targets
     
     def _predict(self, batch: TokenizedSeqBatch) -> AttentionInput:
-        user_emb = self.user_id_embedder(batch.user_ids)
+        user_emb = self._get_user_emb(batch.user_ids)
         sem_ids_emb = self.sem_id_embedder(batch)
         sem_ids_emb, sem_ids_emb_fut = sem_ids_emb.seq, sem_ids_emb.fut
         seq_lengths = batch.seq_mask.sum(axis=1)
@@ -157,18 +336,19 @@ class EncoderDecoderRetrievalModel(nn.Module):
     ) -> GenerationOutput:
         
         assert self.enable_generation, "Model generation is not enabled"
+        batch = self._apply_history_sid_selection(batch)
 
         B, N = batch.sem_ids.shape
         generated, log_probas = None, 0
         k = 64 if top_k else 1
-        n_top_k_candidates = 256 if top_k else 1
+        n_top_k_candidates = self.num_embeddings if top_k else 1
 
         input_batch = TokenizedSeqBatch(
             user_ids=batch.user_ids,
             sem_ids=batch.sem_ids,
-            sem_ids_fut=None,
             seq_mask=batch.seq_mask,
             token_type_ids=batch.token_type_ids,
+            sem_ids_fut=None,
             token_type_ids_fut=None
         )
 
@@ -238,35 +418,73 @@ class EncoderDecoderRetrievalModel(nn.Module):
                 generated = top_k_samples.unsqueeze(-1)
                 log_probas = torch.clone(top_k_log_probas.detach())
         
+        sem_ids_out = generated[:, 0, :] if generated.dim() == 3 and generated.shape[1] == 1 else generated
+        log_probas_out = log_probas[:, 0] if log_probas.dim() == 2 and log_probas.shape[1] == 1 else log_probas
+
         return GenerationOutput(
-            sem_ids=generated.squeeze(),
-            log_probas=log_probas.squeeze()
+            sem_ids=sem_ids_out,
+            log_probas=log_probas_out
         )
             
     @torch.compile
     def forward(self, batch: TokenizedSeqBatch) -> ModelOutput:
+        batch = self._apply_history_sid_selection(batch)
         seq_mask = batch.seq_mask
         B, N = seq_mask.shape
+        use_multi_target_loss = (
+            self.use_multi_sid and
+            batch.multi_sids_fut is not None and
+            batch.multi_sids_fut.shape[1] > 1 and
+            batch.sem_ids_fut is not None
+        )
 
-        trnsf_out = self._predict(batch)
+        predict_batch = batch
+        predict_batch_size = B
+        num_targets = 1
+        if (self.training or not self.enable_generation) and use_multi_target_loss:
+            predict_batch, num_targets = self._expand_multi_target_batch(batch)
+            predict_batch_size = predict_batch.seq_mask.shape[0]
+
+        trnsf_out = self._predict(predict_batch)
         
         if self.training or not self.enable_generation:
             predict_out = self.out_proj(trnsf_out)
             if self.jagged_mode:
                 # This works because batch.sem_ids_fut is fixed length, no padding.
-                logits = rearrange(jagged_to_flattened_tensor(predict_out), "(b n) d -> b n d", b=B)[:,:-1,:].flatten(end_dim=1)
-                target = batch.sem_ids_fut.flatten(end_dim=1)
-                unred_loss = rearrange(F.cross_entropy(logits, target, reduction="none", ignore_index=-1), "(b n) -> b n", b=B)
-                loss = unred_loss.sum(axis=1).mean()
+                logits_by_pos = rearrange(
+                    jagged_to_flattened_tensor(predict_out),
+                    "(b n) d -> b n d",
+                    b=predict_batch_size
+                )[:, :-1, :]
+                logits = logits_by_pos.flatten(end_dim=1)
+                target = predict_batch.sem_ids_fut.flatten(end_dim=1)
+                unred_loss = rearrange(
+                    F.cross_entropy(logits, target, reduction="none", ignore_index=-1),
+                    "(b n) -> b n",
+                    b=predict_batch_size
+                )
             else:
                 logits = predict_out
                 out = logits[:, :-1, :].flatten(end_dim=1)
-                target = batch.sem_ids_fut.flatten(end_dim=1)
-                unred_loss = rearrange(F.cross_entropy(out, target, reduction="none", ignore_index=-1), "(b n) -> b n", b=B)
+                target = predict_batch.sem_ids_fut.flatten(end_dim=1)
+                unred_loss = rearrange(
+                    F.cross_entropy(out, target, reduction="none", ignore_index=-1),
+                    "(b n) -> b n",
+                    b=predict_batch_size
+                )
+
+            if use_multi_target_loss:
+                candidate_nll = unred_loss.sum(axis=1).reshape(B, num_targets)
+                loss = -torch.logsumexp(-candidate_nll, dim=1).mean()
+                loss_d = unred_loss.reshape(B, num_targets, -1).mean(axis=1).mean(axis=0)
+                if self.jagged_mode:
+                    logits = logits_by_pos[:, :, :].reshape(B, num_targets, -1, logits_by_pos.shape[-1])[:, 0, :, :].flatten(end_dim=1)
+            else:
                 loss = unred_loss.sum(axis=1).mean()
+                loss_d = unred_loss.mean(axis=0)
+
             if not self.training and self.jagged_mode:
                 self.transformer.cached_enc_output = None
-            loss_d = unred_loss.mean(axis=0)
         elif self.jagged_mode:
             trnsf_out = trnsf_out.contiguous()
             trnsf_out_flattened = rearrange(jagged_to_flattened_tensor(trnsf_out), "(b n) d -> b n d", b=B)[:,-1,:]

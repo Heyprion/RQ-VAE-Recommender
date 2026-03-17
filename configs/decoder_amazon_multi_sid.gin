@@ -1,0 +1,63 @@
+# 导入数据处理模块，后续会引用其中的 RecDataset 枚举来指定数据集。
+import data.processed
+# 导入模型定义模块，确保本配置里用到的模型相关符号可被 Gin 正确解析。
+import modules.model
+
+# 总训练步数（迭代次数），与 Amazon decoder 基础配置一致。
+train.iterations=200000
+# 学习率保持与基础配置一致。
+train.learning_rate=0.0003
+# 权重衰减保持与基础配置一致。
+train.weight_decay=0.035
+# batch size 保持与基础配置一致。
+train.batch_size=256
+# VAE 输入向量维度保持为 768。
+train.vae_input_dim=768
+# VAE hidden dims 与基础配置对齐。
+train.vae_hidden_dims=[512, 256, 128]
+# item_repr / head_repr 维度保持为 32。
+train.vae_embed_dim=32
+# 当前不使用额外类别特征。
+train.vae_n_cat_feats=0
+# 每个 head 的 codebook 大小保持为 256。
+train.vae_codebook_size=256
+# 保持 wandb 在线日志记录。
+train.wandb_logging=True
+# 载入 multi-SID RQ-VAE checkpoint；路径与新的 tokenizer 训练输出目录对应。
+train.pretrained_rqvae_path="out/rqvae/amazon_multi_sid/checkpoint_399999.pt"
+# decoder multi-SID 实验输出目录。
+train.save_dir_root="out/decoder/amazon_multi_sid/"
+# 数据集根目录保持不变。
+train.dataset_folder="dataset/amazon"
+# 指定使用 Amazon 数据集。
+train.dataset=%data.processed.RecDataset.AMAZON
+# 不强制重新处理数据。
+train.force_dataset_process=False
+# 完整评估频率保持与基础配置一致。
+train.full_eval_every=10000
+# 轻量评估频率保持与基础配置一致。
+train.partial_eval_every=5000
+# 使用 Amazon Beauty 子集。
+train.dataset_split="beauty"
+# dropout、注意力头数、宽度和深度与基础配置保持一致。
+train.dropout_p=0.15
+train.attn_heads=8
+train.attn_embed_dim=512
+train.attn_layers=8
+train.decoder_embed_dim=128
+# 继续使用 jagged 变长模式。
+train.model_jagged_mode=True
+
+# 开启 multi-SID tokenizer/decoder 路径。
+train.use_multi_sid=True
+# 每个 item 生成 4 组潜在语义 SID tuple。
+train.num_sid_heads=4
+# 在历史序列位置启用基于上下文的 hard selection。
+train.use_sid_hard_selection=True
+# 每个历史物品做选择时，只看其前面最近 20 个有效历史物品作为上下文。
+train.sid_selection_context_len=20
+# 若当前物品之前的有效历史少于 1 个，则直接退回 canonical head-0，不做注意力选择。
+train.sid_selection_min_history=1
+# 这两个系数只用于构造与 tokenizer checkpoint 匹配的 RQ-VAE 实例；保持与 tokenizer 训练配置一致。
+train.lambda_orth=1e-3
+train.lambda_bal=1e-3

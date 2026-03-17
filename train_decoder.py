@@ -1,5 +1,14 @@
 import argparse
 import os
+
+try:
+    omp_num_threads = int(os.environ.get("OMP_NUM_THREADS", "1") or "1")
+except ValueError:
+    omp_num_threads = 1
+
+if omp_num_threads <= 0:
+    os.environ["OMP_NUM_THREADS"] = "1"
+
 import gin
 import torch
 import wandb
@@ -11,6 +20,7 @@ from data.processed import SeqData
 from data.utils import batch_to
 from data.utils import cycle
 from data.utils import next_batch
+from evaluate.metrics import ItemTopKAccumulator
 from evaluate.metrics import TopKAccumulator
 from modules.model import EncoderDecoderRetrievalModel
 from modules.scheduler.inv_sqrt import InverseSquareRootScheduler
@@ -62,7 +72,14 @@ def train(
     push_vae_to_hf=False,
     train_data_subsample=True,
     model_jagged_mode=True,
-    vae_hf_model_name="edobotta/rqvae-amazon-beauty"
+    vae_hf_model_name="edobotta/rqvae-amazon-beauty",
+    use_multi_sid=False,
+    num_sid_heads=1,
+    use_sid_hard_selection=False,
+    lambda_orth=0.0,
+    lambda_bal=0.0,
+    sid_selection_context_len=20,
+    sid_selection_min_history=1,
 ):  
     if dataset != RecDataset.AMAZON:
         raise Exception(f"Dataset currently not supported: {dataset}.")
@@ -123,10 +140,20 @@ def train(
         n_cat_feats=vae_n_cat_feats,
         rqvae_weights_path=pretrained_rqvae_path,
         rqvae_codebook_normalize=vae_codebook_normalize,
-        rqvae_sim_vq=vae_sim_vq
+        rqvae_sim_vq=vae_sim_vq,
+        use_multi_sid=use_multi_sid,
+        num_sid_heads=num_sid_heads,
+        lambda_orth=lambda_orth,
+        lambda_bal=lambda_bal,
     )
     tokenizer = accelerator.prepare(tokenizer)
     tokenizer.precompute_corpus_ids(item_dataset)
+
+    effective_num_sid_heads = num_sid_heads if use_multi_sid and num_sid_heads > 1 else 1
+    decoder_num_embeddings = (
+        tokenizer.num_embeddings if effective_num_sid_heads > 1
+        else vae_codebook_size * effective_num_sid_heads
+    )
     
     if push_vae_to_hf:
         login()
@@ -138,11 +165,15 @@ def train(
         dropout=dropout_p,
         num_heads=attn_heads,
         n_layers=attn_layers,
-        num_embeddings=vae_codebook_size,
+        num_embeddings=decoder_num_embeddings,
         inference_verifier_fn=lambda x: tokenizer.exists_prefix(x),
         sem_id_dim=tokenizer.sem_ids_dim,
         max_pos=train_dataset.max_seq_len*tokenizer.sem_ids_dim,
-        jagged_mode=model_jagged_mode
+        jagged_mode=model_jagged_mode,
+        use_multi_sid=effective_num_sid_heads > 1,
+        use_sid_hard_selection=use_sid_hard_selection,
+        sid_selection_context_len=sid_selection_context_len,
+        sid_selection_min_history=sid_selection_min_history,
     )
 
     optimizer = AdamW(
@@ -169,7 +200,11 @@ def train(
         model, optimizer, lr_scheduler
     )
 
-    metrics_accumulator = TopKAccumulator(ks=[1, 5, 10])
+    metrics_accumulator = (
+        ItemTopKAccumulator(ks=[1, 5, 10])
+        if effective_num_sid_heads > 1 else
+        TopKAccumulator(ks=[1, 5, 10])
+    )
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Device: {device}, Num Parameters: {num_params}")
     with tqdm(initial=start_iter, total=start_iter + iterations,
@@ -226,7 +261,11 @@ def train(
                         tokenized_data = tokenizer(data)
 
                         generated = model.generate_next_sem_id(tokenized_data, top_k=True, temperature=1)
-                        actual, top_k = tokenized_data.sem_ids_fut, generated.sem_ids
+                        if effective_num_sid_heads > 1:
+                            actual = tokenized_data.item_ids_fut.reshape(-1)
+                            top_k = tokenizer.unique_item_topk(generated.sem_ids)
+                        else:
+                            actual, top_k = tokenized_data.sem_ids_fut, generated.sem_ids
 
                         metrics_accumulator.accumulate(actual=actual, top_k=top_k)
 

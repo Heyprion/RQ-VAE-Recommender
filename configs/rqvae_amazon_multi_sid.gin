@@ -1,0 +1,60 @@
+# 导入数据处理模块，供下面数据集枚举与数据构建逻辑引用。
+import data.processed
+# 导入量化模块，供 codebook 前向模式（如 ROTATION_TRICK）枚举引用。
+import modules.quantize
+
+# 总训练步数，保持与 Amazon RQ-VAE 基础配置一致。
+train.iterations=400000
+# 优化器学习率，保持与基础配置一致。
+train.learning_rate=0.0005
+# 权重衰减系数，保持与基础配置一致。
+train.weight_decay=0.01
+# 每个 step 的批大小保持不变。
+train.batch_size=64
+# VAE 输入维度保持与 Amazon Beauty 文本 embedding 维度一致。
+train.vae_input_dim=768
+# 当前不使用额外类别特征。
+train.vae_n_cat_feats=0
+# 编码器隐藏层宽度与基础配置对齐。
+train.vae_hidden_dims=[512, 256, 128]
+# item_repr / head_repr 维度保持与基础配置一致。
+train.vae_embed_dim=32
+# 每个 head 自己的 codebook 大小保持为 256。
+train.vae_codebook_size=256
+# codebook 是否归一化，保持与基础配置一致。
+train.vae_codebook_normalize=False
+# 不启用 SimVQ，保持原路径。
+train.vae_sim_vq=False
+# 模型保存频率保持不变。
+train.save_model_every=5000
+# 评估频率保持不变。
+train.eval_every=5000
+# 数据集根目录保持不变。
+train.dataset_folder="dataset/amazon"
+# 使用 Amazon Beauty 子集。
+train.dataset=%data.processed.RecDataset.AMAZON
+# multi-SID RQ-VAE 输出目录。
+train.save_dir_root="out/rqvae/amazon_multi_sid/"
+# 保持 wandb 记录方式一致。
+train.wandb_logging=True
+# commitment loss 权重保持不变。
+train.commitment_weight=0.25
+# 每个 head 仍使用 3 层 residual quantization。
+train.vae_n_layers=3
+# 量化前向模式与基础配置一致。
+train.vae_codebook_mode=%modules.quantize.QuantizeForwardMode.ROTATION_TRICK
+# 不强制重新预处理数据。
+train.force_dataset_process=False
+# 使用 beauty 子集。
+train.dataset_split="beauty"
+# 保持训练中执行评估。
+train.do_eval=True
+
+# 开启 multi-SID 路径。
+train.use_multi_sid=True
+# 每个 item 生成 4 组潜在语义 semantic-ID tuple。
+train.num_sid_heads=4
+# 正交/去冗余约束权重。
+train.lambda_orth=1e-3
+# 信息均衡约束权重。
+train.lambda_bal=1e-3

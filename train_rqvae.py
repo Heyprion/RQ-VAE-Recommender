@@ -1,5 +1,14 @@
 import gin
 import os
+
+try:
+    omp_num_threads = int(os.environ.get("OMP_NUM_THREADS", "1") or "1")
+except ValueError:
+    omp_num_threads = 1
+
+if omp_num_threads <= 0:
+    os.environ["OMP_NUM_THREADS"] = "1"
+
 import torch
 import numpy as np
 import wandb
@@ -51,7 +60,11 @@ def train(
     vae_codebook_mode=QuantizeForwardMode.GUMBEL_SOFTMAX,
     vae_sim_vq=False,
     vae_n_layers=3,
-    dataset_split="beauty"
+    dataset_split="beauty",
+    use_multi_sid=False,
+    num_sid_heads=1,
+    lambda_orth=0.0,
+    lambda_bal=0.0,
 ):
     if wandb_logging:
         params = locals()
@@ -89,7 +102,11 @@ def train(
         codebook_mode=vae_codebook_mode,
         n_layers=vae_n_layers,
         n_cat_features=vae_n_cat_feats,
-        commitment_weight=commitment_weight
+        commitment_weight=commitment_weight,
+        use_multi_sid=use_multi_sid,
+        num_sid_heads=num_sid_heads,
+        lambda_orth=lambda_orth,
+        lambda_bal=lambda_bal,
     )
 
     optimizer = AdamW(
@@ -125,7 +142,11 @@ def train(
         n_cat_feats=vae_n_cat_feats,
         rqvae_weights_path=pretrained_rqvae_path,
         rqvae_codebook_normalize=vae_codebook_normalize,
-        rqvae_sim_vq=vae_sim_vq
+        rqvae_sim_vq=vae_sim_vq,
+        use_multi_sid=use_multi_sid,
+        num_sid_heads=num_sid_heads,
+        lambda_orth=lambda_orth,
+        lambda_bal=lambda_bal,
     )
     tokenizer.rq_vae = model
 
@@ -175,6 +196,8 @@ def train(
             if accelerator.is_main_process and wandb_logging:
                 # Compute logs depending on training model_output here to avoid cuda graph overwrite from eval graph.
                 emb_norms_avg = model_output.embs_norm.mean(axis=0)
+                if emb_norms_avg.dim() > 1:
+                    emb_norms_avg = emb_norms_avg.mean(axis=0)
                 emb_norms_avg_log = {
                     f"emb_avg_norm_{i}": emb_norms_avg[i].cpu().item() for i in range(vae_n_layers)
                 }
@@ -183,6 +206,8 @@ def train(
                     "total_loss": total_loss.cpu().item(),
                     "reconstruction_loss": model_output.reconstruction_loss.cpu().item(),
                     "rqvae_loss": model_output.rqvae_loss.cpu().item(),
+                    "orth_loss": model_output.orth_loss.cpu().item(),
+                    "balance_loss": model_output.balance_loss.cpu().item(),
                     "temperature": t,
                     "p_unique_ids": model_output.p_unique_ids.cpu().item(),
                     **emb_norms_avg_log,

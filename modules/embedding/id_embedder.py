@@ -24,18 +24,32 @@ class SemIdEmbedder(nn.Module):
             embedding_dim=embeddings_dim,
             padding_idx=self.padding_idx
         )
+
+    def _expand_token_type_ids(self, sem_ids: Tensor, token_type_ids: Tensor = None) -> Tensor:
+        if token_type_ids is not None:
+            return token_type_ids
+
+        sem_ids_dim = sem_ids.shape[-1]
+        view_shape = [1] * sem_ids.dim()
+        view_shape[-1] = sem_ids_dim
+        return torch.arange(sem_ids_dim, device=sem_ids.device).view(*view_shape).expand_as(sem_ids)
+
+    def embed_sem_ids(self, sem_ids: Tensor, token_type_ids: Tensor = None) -> Tensor:
+        token_type_ids = self._expand_token_type_ids(sem_ids, token_type_ids)
+        input_ids = token_type_ids * self.num_embeddings + sem_ids.clamp(min=0)
+        input_ids = input_ids.masked_fill(sem_ids < 0, self.padding_idx)
+        return self.emb(input_ids)
     
     def forward(self, batch: TokenizedSeqBatch) -> Tensor:
-        sem_ids = batch.token_type_ids*self.num_embeddings + batch.sem_ids
-        sem_ids[~batch.seq_mask] = self.padding_idx
+        sem_ids = batch.sem_ids.clone()
+        sem_ids[~batch.seq_mask] = -1
 
         if batch.sem_ids_fut is not None:
-            sem_ids_fut = batch.token_type_ids_fut*self.num_embeddings + batch.sem_ids_fut
-            sem_ids_fut = self.emb(sem_ids_fut)
+            sem_ids_fut = self.embed_sem_ids(batch.sem_ids_fut, batch.token_type_ids_fut)
         else:
             sem_ids_fut = None
         return SemIdEmbeddingBatch(
-            seq=self.emb(sem_ids),
+            seq=self.embed_sem_ids(sem_ids, batch.token_type_ids),
             fut=sem_ids_fut
         ) 
     

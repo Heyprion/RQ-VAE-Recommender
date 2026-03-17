@@ -29,3 +29,27 @@ class TopKAccumulator:
         
     def reduce(self) -> dict:
         return {k: v/self.total for k, v in self.metrics.items()}
+
+
+class ItemTopKAccumulator:
+    def __init__(self, ks=[1, 5, 10]):
+        self.ks = ks
+        self.reset()
+
+    def reset(self):
+        self.total = 0
+        self.metrics = defaultdict(int)
+
+    def accumulate(self, actual: Tensor, top_k: Tensor) -> None:
+        actual = actual.reshape(-1)
+        top_k = top_k.reshape(actual.shape[0], -1)
+
+        for k in self.ks:
+            candidate_items = top_k[:, :k]
+            hit_mask = (candidate_items == actual.unsqueeze(1)).any(dim=1)
+            self.metrics[f"h@{k}"] += hit_mask.sum().item()
+
+        self.total += actual.shape[0]
+
+    def reduce(self) -> dict:
+        return {k: v/self.total for k, v in self.metrics.items()}
