@@ -42,7 +42,9 @@ train.dataset=%data.processed.RecDataset.AMAZON
 # 是否强制重新处理数据；False 表示优先复用已处理缓存，节省启动时间。
 train.force_dataset_process=False
 # 全量评估频率（每多少 step 做一次完整评估）；10000 表示每 1 万步。
-train.full_eval_every=10000
+train.full_eval_every=20000
+# 模型保存频率
+train.save_model_every=20000
 # 部分评估频率（更轻量的评估）；5000 表示每 5000 步做一次快速验证。
 train.partial_eval_every=5000
 # 使用的数据子集/切分名称；"beauty" 表示 Amazon Beauty 子数据集。
